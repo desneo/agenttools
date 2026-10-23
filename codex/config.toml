@@ -1,0 +1,8 @@
+# 由 Codex 按需请求执行审批。
+approval_policy = "on-request"
+
+# 沙箱允许写入工作区，工作区外的写入需要额外授权。
+sandbox_mode = "workspace-write"
+
+# 使用自动审批审查器评估审批请求。
+approvals_reviewer = "auto_review"

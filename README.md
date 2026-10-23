@@ -4,7 +4,7 @@
 
 ## 同步部署 skill
 
-[zsh-codex-sync](codex/skills/zsh-codex-sync/SKILL.md) 将仓库中的全局配置和自定义 skills 部署到本机或 SSH 远程机器。它按文件、skill 目录增量建立软链接，保留其他来源的内容，同名冲突先备份。
+[zsh-codex-sync](codex/skills/zsh-codex-sync/SKILL.md) 将仓库中的全局配置和自定义 skills 部署到本机或 SSH 远程机器。审批设置按字段合并，全局指令和 skill 目录增量建立软链接；已有内容按部署规则保留或备份。
 
 ### 首次接入本机
 
@@ -67,6 +67,7 @@ agenttools/
 ├── README.md
 ├── codex/
 │   ├── AGENTS.md                 # 全局指令
+│   ├── config.toml               # 带中文注释的三个全局审批设置
 │   └── skills/
 │       └── zsh-codex-sync/
 │           ├── SKILL.md          # 同步部署工作流
@@ -82,7 +83,24 @@ agenttools/
 ~/.codex/skills/<自定义名称>   -> <仓库>/codex/skills/<自定义名称>
 ```
 
-`codex/` 根目录的普通文件逐个部署；skills 只安装包含 `SKILL.md` 的一级目录。已指向同一来源的链接跳过，同名文件、目录、失效链接先备份为旁边的 `.backup.<时间>.<进程号>` 路径，链接失败时还原当前项。其他已完成项保留。其他来源的 skills 不删除，来源已移除 skill 的旧链接需自行清理。
+`codex/config.toml` 按顶层字段合并到目标 `config.toml`，维护以下全局设置：
+
+```toml
+# 由 Codex 按需请求执行审批。
+approval_policy = "on-request"
+
+# 沙箱允许写入工作区，工作区外的写入需要额外授权。
+sandbox_mode = "workspace-write"
+
+# 使用自动审批审查器评估审批请求。
+approvals_reviewer = "auto_review"
+```
+
+合并保留已有模型、服务商、MCP、profile、其他字段及注释，缺失字段连同来源中的注释插入到首个 TOML 表之前。只有值变化时才备份并原子写入；值相同时跳过。目标保存为普通文件，已有软链接先备份并转换，原链接指向的文件保持原状。已有普通文件的权限保留，新配置权限为 `0600`。
+
+合并只处理这三个字段的顶层单行字符串；重复定义、点分键、表写法或未闭合内容会在改动前停止。项目配置和 profile 内的同名字段保持原状，最终生效值还受 Codex 配置优先级影响。三项配置的含义见 [自动审批审查](https://learn.chatgpt.com/docs/sandboxing/auto-review) 和 [配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+`codex/` 根目录的其他普通文件逐个软链接部署；skills 只安装包含 `SKILL.md` 的一级目录。已指向同一来源的链接跳过，同名文件、目录、失效链接先备份为旁边的 `.backup.<时间>.<进程号>` 路径，链接失败时还原当前项。其他已完成项保留。其他来源的 skills 不删除，来源已移除 skill 的旧链接需自行清理。
 
 自己维护的 skill 名称和目录统一使用 `zsh-` 前缀。新增 skill 时创建 `codex/skills/zsh-<名称>/SKILL.md`，frontmatter 的 `name` 与目录名一致，包含 `description` 和实际指令，按需添加辅助资源，再运行 `$zsh-codex-sync`。本机可直接部署工作区；远程部署前需将变更发布到仓库。
 
@@ -94,6 +112,6 @@ agenttools/
 python3 -m unittest discover -s tests -v
 ```
 
-测试使用临时目录、本地 Git 仓库及模拟 SSH，不改动真实用户配置、不安装软件、不访问外网。skill 格式使用 `skill-creator` 自带的 `quick_validate.py` 校验。
+测试使用临时目录、本地 Git 仓库及模拟 SSH，不改动真实用户配置、不安装软件、不访问外网。有 Codex CLI 时额外用临时 `CODEX_HOME` 校验审批配置能被读取；没有时跳过该项。skill 格式使用 `skill-creator` 自带的 `quick_validate.py` 校验。
 
 参考：[Codex 全局指令](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[Skills](https://learn.chatgpt.com/docs/build-skills)。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将 agenttools 的 Codex 配置增量软链接到本机或 SSH 目标。"""
+"""合并 Codex 审批配置，并增量软链接全局指令及 skills。"""
 
 import argparse
 from datetime import datetime
@@ -24,6 +24,141 @@ ALLOWED_ORIGINS = {
     "git@github.com:desneo/agenttools.git",
     "ssh://git@github.com/desneo/agenttools.git",
 }
+POLICY_KEYS = {"approval_policy", "sandbox_mode", "approvals_reviewer"}
+
+
+def toml_statements(text):
+    """按完整语句切分，跳过字符串、注释和数组内的换行，保留原文。"""
+    start = index = 0
+    quote = None
+    brackets = []
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if quote.startswith('"') and char == "\\":
+                index += 2
+                continue
+            if text.startswith(quote, index):
+                length = len(quote)
+                if length == 3:
+                    while index + length < len(text) and text[index + length] == char and length < 5:
+                        length += 1
+                index += length
+                quote = None
+                continue
+            if char == "\n" and len(quote) == 1:
+                raise ValueError("config.toml 的单行字符串未闭合")
+        elif char in "\"'":
+            quote = char * 3 if text.startswith(char * 3, index) else char
+            index += len(quote)
+            continue
+        elif char == "#":
+            newline = text.find("\n", index)
+            index = len(text) if newline == -1 else newline
+            continue
+        elif char in "[{":
+            brackets.append(char)
+        elif char in "]}":
+            if not brackets or brackets.pop() != {']': '[', '}': '{'}[char]:
+                raise ValueError("config.toml 括号不匹配")
+        if char == "\n" and quote is None and not brackets:
+            yield start, index + 1, text[start:index + 1]
+            start = index + 1
+        index += 1
+    if quote or brackets:
+        raise ValueError("config.toml 存在未闭合的字符串或数组")
+    if start < len(text):
+        yield start, len(text), text[start:]
+
+
+def policy_entries(text):
+    """只识别受管理的顶层字符串，复杂或重复写法停止，其他语句原样保留。"""
+    entries = {}
+    root = True
+    first_table = len(text)
+    key_pattern = r'''\s*("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[A-Za-z0-9_-]+)\s*([=.\]])'''
+    for start, end, statement in toml_statements(text):
+        stripped = statement.lstrip()
+        table = stripped.startswith("[")
+        if table:
+            first_table = min(first_table, start)
+            root = False
+        if not root and not table:
+            continue
+        match = re.match(key_pattern, stripped.lstrip("[") if table else statement)
+        if not match:
+            continue
+        raw_key, operator = match.groups()
+        key = json.loads(raw_key) if raw_key.startswith('"') else raw_key.strip("'")
+        if key not in POLICY_KEYS:
+            continue
+        if table or operator != "=":
+            raise ValueError(f"{key} 使用了表或点分写法，请先改成顶层字符串")
+        value = re.fullmatch(r'''([ \t]*)("(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')([ \t]*(?:#[^\r\n]*)?(?:\r?\n)?)''', statement[match.end():])
+        if not value or key in entries:
+            raise ValueError(f"{key} 不是单行字符串或重复定义，请先检查配置")
+        raw_value = value.group(2)
+        decoded = json.loads(raw_value) if raw_value.startswith('"') else raw_value[1:-1]
+        value_start = start + match.end() + len(value.group(1))
+        entries[key] = (decoded, value_start, value_start + len(raw_value), start)
+    return entries, first_table
+
+
+def prepare_config(source, destination):
+    template = source.read_text(encoding="utf-8")
+    desired, _ = policy_entries(template)
+    if set(desired) != POLICY_KEYS:
+        raise ValueError("来源 config.toml 必须包含三个顶层审批字符串字段")
+    if destination.exists() and not destination.is_file():
+        raise ValueError(f"目标 config.toml 不是文件：{destination}")
+    # 读取有效软链接的内容，但后续原子替换链接本身，避免修改其指向的文件。
+    original = destination.read_bytes().decode("utf-8") if destination.exists() else ""
+    current, insertion = policy_entries(original)
+    changes = []
+    missing = []
+    for key, (value, _, _, source_start) in desired.items():
+        if key in current:
+            old, start, end, _ = current[key]
+            if old != value:
+                changes.append((start, end, json.dumps(value, ensure_ascii=False)))
+        else:
+            comments = []
+            for line in reversed(template[:source_start].splitlines()):
+                if not line.lstrip().startswith("#"):
+                    break
+                comments.insert(0, line)
+            missing.append("\n".join(comments + [f"{key} = {json.dumps(value, ensure_ascii=False)}"]))
+    if missing:
+        prefix = "\n" if insertion and not original[:insertion].endswith("\n") else ""
+        changes.append((insertion, insertion, prefix + "\n\n".join(missing) + "\n\n"))
+    merged = original
+    for start, end, value in sorted(changes, reverse=True):
+        merged = merged[:start] + value + merged[end:]
+    if merged == original and not destination.is_symlink():
+        return None
+    return merged
+
+
+def write_config(destination, content):
+    if content is None:
+        log(f"审批配置已一致：{destination}")
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=".config-", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output:
+            output.write(content)
+        if destination.exists():
+            os.chmod(temporary, destination.stat().st_mode & 0o777)
+        if os.path.lexists(destination):
+            suffix = datetime.now().strftime("%Y%m%d%H%M%S%f")
+            backup = destination.with_name(f"{destination.name}.backup.{suffix}.{os.getpid()}")
+            shutil.copy2(destination, backup, follow_symlinks=False)
+            log(f"已备份：{backup}")
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    log(f"已合并三个顶层审批字段：{destination}")
 
 
 def log(message):
@@ -193,11 +328,16 @@ def deploy(repository, target=None, update=False, password=None):
     for item in configs + skill_items:
         if item.is_symlink():
             raise ValueError(f"来源包含软链接，请先确认实际内容：{item}")
+    config_source = source / "config.toml"
+    config_content = prepare_config(config_source, target / "config.toml") if config_source.is_file() else None
     target.mkdir(parents=True, exist_ok=True)
     (target / "skills").mkdir(exist_ok=True)
     log(f"来源：{repository}；目标：{target}")
     for item in configs:
-        link_item(item, target / item.name)
+        if item.name == "config.toml":
+            write_config(target / item.name, config_content)
+        else:
+            link_item(item, target / item.name)
     for item in skill_items:
         link_item(item, target / "skills" / item.name)
     log(f"部署完成：{len(configs)} 个配置文件，{len(skill_items)} 个 skill")

@@ -2,6 +2,7 @@
 
 - 本仓库维护 Codex 全局配置与自定义 skills，使用说明见 [README.md](README.md)。
 - `codex/AGENTS.md`：部署给 Codex 使用的全局指令，保持在 60 行以内。
+- `codex/config.toml`：带中文注释的全局审批设置；部署时按字段合并，保留目标其他配置。
 - `codex/skills/<名称>/SKILL.md`：自定义 skill；按目录增量软链接安装。
 - 自己维护的 skill 名称和目录统一使用 `zsh-` 前缀。
 - [zsh-codex-sync](codex/skills/zsh-codex-sync/SKILL.md)：本机及 SSH 远程同步部署，辅助代码放在 skill 自身目录。

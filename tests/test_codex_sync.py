@@ -84,11 +84,12 @@ class CodexSyncTests(unittest.TestCase):
 
     def test_local_deployment_and_incremental_skills(self):
         skill = self.add_skill()
-        (self.source / "config.toml").write_text("# 配置\n")
+        shutil.copyfile(ROOT / "codex/config.toml", self.source / "config.toml")
         (self.source / "skills" / "incomplete").mkdir()
         sync.deploy(self.repository, self.target)
         self.assertEqual((self.target / "AGENTS.md").resolve(), self.source / "AGENTS.md")
-        self.assertEqual((self.target / "config.toml").resolve(), self.source / "config.toml")
+        self.assertFalse((self.target / "config.toml").is_symlink())
+        self.assertIn('approval_policy = "on-request"', (self.target / "config.toml").read_text())
         self.assertEqual((self.target / "skills" / skill.name).resolve(), skill)
         self.assertFalse((self.target / "skills" / "incomplete").exists())
         second = self.add_skill("后续技能")
@@ -257,6 +258,120 @@ class CodexSyncTests(unittest.TestCase):
             with self.subTest(args=args):
                 result = REAL_RUN([sys.executable, str(HELPER), *args], capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0)
+
+    def policy_source(self):
+        source = self.source / "config.toml"
+        shutil.copyfile(ROOT / "codex/config.toml", source)
+        return source
+
+    def test_config_merge_preserves_model_tables_comments_and_mode(self):
+        self.policy_source()
+        self.target.mkdir()
+        target = self.target / "config.toml"
+        original = ('# 模型配置\nmodel = "example"\n'
+                    '"approval_policy" = "never" # 保留原注释\n'
+                    "sandbox_mode = 'read-only'\n"
+                    '[mcp_servers.demo]\ncommand = "echo"\nargs = ["hello"]\n'
+                    '[profiles.custom]\napproval_policy = "never"\n')
+        target.write_text(original)
+        target.chmod(0o640)
+        sync.deploy(self.repository, self.target)
+        merged = target.read_text()
+        self.assertIn('"approval_policy" = "on-request" # 保留原注释', merged)
+        self.assertIn('sandbox_mode = "workspace-write"', merged)
+        self.assertIn('approvals_reviewer = "auto_review"', merged)
+        self.assertIn('# 模型配置\nmodel = "example"\n', merged)
+        self.assertTrue(merged.endswith(original[original.index('[mcp_servers.demo]'):]))
+        self.assertLess(merged.index('approvals_reviewer'), merged.index('[mcp_servers.demo]'))
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(next(self.target.glob('config.toml.backup.*')).read_text(), original)
+        before = sorted(self.target.glob('config.toml.backup.*'))
+        sync.deploy(self.repository, self.target)
+        self.assertEqual(target.read_text(), merged)
+        self.assertEqual(before, sorted(self.target.glob('config.toml.backup.*')))
+
+    def test_new_config_contains_comments_and_has_private_permissions(self):
+        self.policy_source()
+        sync.deploy(self.repository, self.target)
+        target = self.target / "config.toml"
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        for comment in ('# 由 Codex', '# 沙箱', '# 使用自动审批'):
+            self.assertIn(comment, target.read_text())
+        self.assertFalse(list(self.target.glob('config.toml.backup.*')))
+
+    def test_multiline_strings_and_arrays_do_not_change_root_scope(self):
+        self.policy_source()
+        self.target.mkdir()
+        target = self.target / 'config.toml'
+        original = ('model = "example"\n'
+                    'note = """\n[not_a_table]\napproval_policy = "example"\n"""\n'
+                    "literal = '''\n[also_not_a_table]\n'''\n"
+                    'items = [\n "[not_a_table]", # 注释带有 " 和 [\n]\n'
+                    'sandbox_mode = "read-only"\n[features]\nexample = false\n')
+        target.write_text(original)
+        sync.deploy(self.repository, self.target)
+        merged = target.read_text()
+        self.assertIn(original[:original.index('sandbox_mode')], merged)
+        self.assertIn('sandbox_mode = "workspace-write"', merged)
+        self.assertTrue(merged.endswith('[features]\nexample = false\n'))
+
+    def test_complex_or_duplicate_managed_fields_stop_before_any_deployment(self):
+        self.policy_source()
+        self.target.mkdir()
+        target = self.target / 'config.toml'
+        for original in ('approval_policy = "never"\napproval_policy = "on-request"\n',
+                         'approval_policy.granular = {}\n', '[approval_policy]\ngranular = {}\n',
+                         'approval_policy = { granular = {} }\n', 'note = """未闭合\n',
+                         'items = [\n', 'sandbox_mode = 42\n'):
+            with self.subTest(original=original):
+                target.write_text(original)
+                with self.assertRaises(ValueError):
+                    sync.deploy(self.repository, self.target)
+                self.assertEqual(target.read_text(), original)
+                self.assertFalse((self.target / 'AGENTS.md').exists())
+                self.assertFalse(list(self.target.glob('config.toml.backup.*')))
+
+    def test_config_symlink_becomes_regular_file_without_changing_its_source(self):
+        self.policy_source()
+        self.target.mkdir()
+        external = self.base / 'external.toml'
+        external.write_text('model = "preserve-me"\napproval_policy = "never"\n')
+        target = self.target / 'config.toml'
+        target.symlink_to(external)
+        sync.deploy(self.repository, self.target)
+        self.assertFalse(target.is_symlink())
+        self.assertIn('model = "preserve-me"', target.read_text())
+        self.assertIn('approval_policy = "on-request"', target.read_text())
+        self.assertIn('approval_policy = "never"', external.read_text())
+        self.assertTrue(next(self.target.glob('config.toml.backup.*')).is_symlink())
+
+    def test_config_atomic_replace_failure_preserves_original(self):
+        self.policy_source()
+        self.target.mkdir()
+        target = self.target / 'config.toml'
+        target.write_text('model = "original"\n')
+        with mock.patch.object(sync.os, 'replace', side_effect=OSError('模拟写入失败')):
+            with self.assertRaises(OSError):
+                sync.deploy(self.repository, self.target)
+        self.assertEqual(target.read_text(), 'model = "original"\n')
+        self.assertFalse(list(self.target.glob('.config-*')))
+        self.assertEqual(next(self.target.glob('config.toml.backup.*')).read_text(), target.read_text())
+
+    @unittest.skipUnless(shutil.which('codex'), '当前机器没有 Codex CLI')
+    def test_codex_accepts_merged_policy_configuration(self):
+        self.policy_source()
+        sync.deploy(self.repository, self.target)
+        command = [shutil.which('codex'), 'features', 'list']
+        result = REAL_RUN(command,
+                          cwd=self.base, env=dict(os.environ, CODEX_HOME=str(self.target)),
+                          capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self.target / 'config.toml'
+        config.write_text(config.read_text().replace('"auto_review"', '"invalid-reviewer"'))
+        rejected = REAL_RUN(command, cwd=self.base, env=dict(os.environ, CODEX_HOME=str(self.target)),
+                            capture_output=True, text=True)
+        self.assertNotEqual(rejected.returncode, 0, 'Codex 没有读取审批审查器字段')
 
     def test_network_fallback_is_scoped_to_subprocesses(self):
         original = dict(os.environ)
