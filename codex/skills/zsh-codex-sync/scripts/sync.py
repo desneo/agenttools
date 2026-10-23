@@ -49,7 +49,7 @@ def probe_network(env):
             proxies.pop(scheme, None)
     # 显式代理已由调用方选定，避免当前进程的 NO_PROXY 覆盖回退路由。
     request = urllib.request.Request(
-        "https://github.com", headers={"User-Agent": "codex-sync", "Host": "github.com"},
+        "https://github.com", headers={"User-Agent": "zsh-codex-sync", "Host": "github.com"},
     )
     if proxies.get("https"):
         proxy = urllib.parse.urlparse(proxies["https"])
@@ -210,7 +210,7 @@ def deploy_remote(args):
     bootstrap = (
         "import json,sys\np=json.load(sys.stdin)\nn={'__name__':'codex_sync_remote'}\n"
         "try:\n"
-        " exec(compile(p['helper'],'codex-sync-remote','exec'),n)\n"
+        " exec(compile(p['helper'],'zsh-codex-sync-remote','exec'),n)\n"
         " n['deploy'](p['source'] or '~/agenttools',p['target'],p['update'],p['password'])\n"
         "except Exception as error:\n"
         " print('[错误] 远程部署失败：'+str(error),file=sys.stderr)\n sys.exit(1)\n"
@@ -227,7 +227,7 @@ def deploy_remote(args):
     if args.password is None:
         subprocess.run(command, input=payload, text=True, check=True)
         return
-    with tempfile.TemporaryDirectory(prefix="codex-sync-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="zsh-codex-sync-") as temporary:
         folder = Path(temporary)
         password_file = folder / "password"
         password_file.touch(mode=0o600)

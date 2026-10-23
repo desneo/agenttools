@@ -4,7 +4,7 @@
 
 ## 同步部署 skill
 
-[codex-sync](codex/skills/codex-sync/SKILL.md) 将仓库中的全局配置和自定义 skills 部署到本机或 SSH 远程机器。它按文件、skill 目录增量建立软链接，保留其他来源的内容，同名冲突先备份。
+[zsh-codex-sync](codex/skills/zsh-codex-sync/SKILL.md) 将仓库中的全局配置和自定义 skills 部署到本机或 SSH 远程机器。它按文件、skill 目录增量建立软链接，保留其他来源的内容，同名冲突先备份。
 
 ### 首次接入本机
 
@@ -12,15 +12,15 @@
 
 ```bash
 git clone https://github.com/desneo/agenttools.git ~/agenttools
-python3 ~/agenttools/codex/skills/codex-sync/scripts/sync.py
+python3 ~/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py
 ```
 
-如果已有仓库，直接运行第二条命令即可。首次部署会把 `codex-sync` 自身也软链接到用户 skills 目录。之后可以在 Codex 中使用：
+如果已有仓库，直接运行第二条命令即可。首次部署会把 `zsh-codex-sync` 自身也软链接到用户 skills 目录。之后可以在 Codex 中使用：
 
 ```text
-使用 $codex-sync 将当前仓库的 Codex 配置和 skills 同步到本机。
-使用 $codex-sync 从 GitHub 更新仓库并部署到本机。
-使用 $codex-sync 将最新配置部署到远程机器，主机是 192.168.1.10，用户名是 alice。
+使用 $zsh-codex-sync 将当前仓库的 Codex 配置和 skills 同步到本机。
+使用 $zsh-codex-sync 从 GitHub 更新仓库并部署到本机。
+使用 $zsh-codex-sync 将最新配置部署到远程机器，主机是 192.168.1.10，用户名是 alice。
 ```
 
 可通过 `/skills` 检查当前 Codex 的发现结果；如未刷新，可重启会话。脚本成功创建链接不等于已经验证 Codex 加载了配置和 skills。
@@ -31,11 +31,11 @@ python3 ~/agenttools/codex/skills/codex-sync/scripts/sync.py
 
 ```bash
 # 使用已有 SSH 密钥或交互认证，克隆或更新远程 ~/agenttools 后部署
-python3 codex/skills/codex-sync/scripts/sync.py \
+python3 codex/skills/zsh-codex-sync/scripts/sync.py \
   --host 192.168.1.10 --user alice --update
 
 # 密码认证，同时供自动安装 Git 时的 sudo 使用
-python3 codex/skills/codex-sync/scripts/sync.py \
+python3 codex/skills/zsh-codex-sync/scripts/sync.py \
   --host 192.168.1.10 --user alice --password '密码' --update
 ```
 
@@ -68,7 +68,7 @@ agenttools/
 ├── codex/
 │   ├── AGENTS.md                 # 全局指令
 │   └── skills/
-│       └── codex-sync/
+│       └── zsh-codex-sync/
 │           ├── SKILL.md          # 同步部署工作流
 │           └── scripts/sync.py   # 可靠执行软链接和 SSH 部署
 └── tests/test_codex_sync.py
@@ -78,13 +78,13 @@ agenttools/
 
 ```text
 ~/.codex/AGENTS.md             -> <仓库>/codex/AGENTS.md
-~/.codex/skills/codex-sync     -> <仓库>/codex/skills/codex-sync
+~/.codex/skills/zsh-codex-sync     -> <仓库>/codex/skills/zsh-codex-sync
 ~/.codex/skills/<自定义名称>   -> <仓库>/codex/skills/<自定义名称>
 ```
 
 `codex/` 根目录的普通文件逐个部署；skills 只安装包含 `SKILL.md` 的一级目录。已指向同一来源的链接跳过，同名文件、目录、失效链接先备份为旁边的 `.backup.<时间>.<进程号>` 路径，链接失败时还原当前项。其他已完成项保留。其他来源的 skills 不删除，来源已移除 skill 的旧链接需自行清理。
 
-新增 skill 时创建 `codex/skills/<名称>/SKILL.md`，包含 `name`、`description` 的 YAML frontmatter 和指令，按需添加辅助资源，再运行 `$codex-sync`。本机可直接部署工作区；远程部署前需将变更发布到仓库。
+自己维护的 skill 名称和目录统一使用 `zsh-` 前缀。新增 skill 时创建 `codex/skills/zsh-<名称>/SKILL.md`，frontmatter 的 `name` 与目录名一致，包含 `description` 和实际指令，按需添加辅助资源，再运行 `$zsh-codex-sync`。本机可直接部署工作区；远程部署前需将变更发布到仓库。
 
 按本仓库约定安装到 `~/.codex/skills/`。官方文档当前列出的用户 skills 标准路径为 `~/.agents/skills/`，使用时需检查当前 Codex 版本对约定目录的发现结果。全局指令 `codex/AGENTS.md` 与项目根目录 `AGENTS.md` 分别维护，不把凭据加入配置仓库。
 

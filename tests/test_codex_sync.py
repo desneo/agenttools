@@ -15,7 +15,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "codex/skills/codex-sync/scripts/sync.py"
+HELPER = ROOT / "codex/skills/zsh-codex-sync/scripts/sync.py"
 SPEC = importlib.util.spec_from_file_location("codex_sync", HELPER)
 sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync)
@@ -25,7 +25,7 @@ GIT = shutil.which("git")
 
 class CodexSyncTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="codex-sync-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="zsh-codex-sync-test-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.repository = self.base / "source repo"
@@ -96,12 +96,12 @@ class CodexSyncTests(unittest.TestCase):
         self.assertTrue((self.target / "skills" / second.name).is_symlink())
 
     def test_bootstrap_and_invocation_through_installed_skill(self):
-        skill = self.source / "skills" / "codex-sync"
+        skill = self.source / "skills" / "zsh-codex-sync"
         shutil.copytree(HELPER.parents[1], skill)
         env = dict(os.environ, CODEX_HOME=str(self.target))
         REAL_RUN([sys.executable, str(skill / "scripts" / "sync.py")],
                  cwd=self.base, env=env, capture_output=True, text=True, check=True)
-        installed = self.target / "skills" / "codex-sync"
+        installed = self.target / "skills" / "zsh-codex-sync"
         self.assertTrue(installed.is_symlink())
         REAL_RUN([sys.executable, str(installed / "scripts" / "sync.py")],
                  cwd=self.base, env=env, capture_output=True, text=True, check=True)

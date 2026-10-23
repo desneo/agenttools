@@ -1,9 +1,9 @@
 ---
-name: codex-sync
+name: zsh-codex-sync
 description: 将 agenttools 仓库中的 Codex 全局配置和自定义 skills 同步部署到本机或 SSH 远程用户目录；适用于配置同步、更新和增量软链接部署。
 ---
 
-# Codex 同步部署
+# zsh-codex-sync
 
 配置来源是 agenttools 仓库的 `codex/`，远程仓库地址为 `https://github.com/desneo/agenttools.git`。
 部署到目标用户的 `~/.codex/`，若目标环境设置 `CODEX_HOME` 则使用该目录；用户显式指定部署目录时优先使用指定目录。
