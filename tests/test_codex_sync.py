@@ -28,6 +28,10 @@ class CodexSyncTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="zsh-codex-sync-test-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.dsh_agents = self.home / ".dsh" / "AGENTS.md"
+        self.remote_home = self.base / "remote home"
         self.repository = self.base / "source repo"
         self.source = self.repository / "codex"
         (self.source / "skills").mkdir(parents=True)
@@ -38,7 +42,9 @@ class CodexSyncTests(unittest.TestCase):
         self.stdout_patch.__enter__()
         self.addCleanup(self.stdout_patch.__exit__, None, None, None)
         self.env_patch = mock.patch.dict(os.environ, {
-            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            "HOME": str(self.home),
+            "USERPROFILE": str(self.home), "PYTHONUTF8": "1",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         })
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
@@ -50,7 +56,8 @@ class CodexSyncTests(unittest.TestCase):
         return skill
 
     def git(self, directory, *args):
-        return REAL_RUN([GIT, "-C", str(directory), *args], check=True, capture_output=True, text=True).stdout.strip()
+        return REAL_RUN([GIT, "-C", str(directory), *args], check=True, capture_output=True,
+                        text=True, encoding="utf-8").stdout.strip()
 
     def commit(self, directory, message="测试提交"):
         self.git(directory, "add", ".")
@@ -75,7 +82,7 @@ class CodexSyncTests(unittest.TestCase):
                 self.git(Path(command[-1]), "remote", "set-url", "origin", sync.REPO_URL)
                 return result
             if command[0] == "git" and "pull" in command:
-                command[1:1] = ["-c", f"url.file://{upstream}.insteadOf={sync.REPO_URL}"]
+                command[1:1] = ["-c", f"url.{upstream.as_uri()}.insteadOf={sync.REPO_URL}"]
             return REAL_RUN(command, **kwargs)
         stack = ExitStack()
         stack.enter_context(mock.patch.object(sync.subprocess, "run", side_effect=run))
@@ -166,6 +173,58 @@ class CodexSyncTests(unittest.TestCase):
             sync.deploy(self.repository)
         self.assertTrue((self.target / "AGENTS.md").is_symlink())
 
+    def test_dsh_agents_uses_home_with_custom_codex_targets(self):
+        for target in (None, self.base / "custom codex"):
+            with self.subTest(target=target), mock.patch.dict(os.environ, {"CODEX_HOME": str(self.target)}):
+                sync.deploy(self.repository, target)
+            self.assertTrue(self.dsh_agents.is_symlink())
+            self.assertEqual(self.dsh_agents.resolve(), self.source / "AGENTS.md")
+        self.assertFalse(list(self.dsh_agents.parent.glob("*.backup.*")))
+
+    def test_dsh_agents_backs_up_existing_content_and_is_idempotent(self):
+        self.dsh_agents.parent.mkdir()
+        self.dsh_agents.write_text("原有 dsh 指令\n")
+        sync.deploy(self.repository, self.target)
+        backups = list(self.dsh_agents.parent.glob("AGENTS.md.backup.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), "原有 dsh 指令\n")
+        self.assertEqual(self.dsh_agents.resolve(), self.source / "AGENTS.md")
+        sync.deploy(self.repository, self.target)
+        self.assertEqual(backups, list(self.dsh_agents.parent.glob("AGENTS.md.backup.*")))
+
+    def test_dsh_agents_backs_up_broken_link(self):
+        self.dsh_agents.parent.mkdir()
+        self.dsh_agents.symlink_to("missing-agents")
+        sync.deploy(self.repository, self.target)
+        backup = next(self.dsh_agents.parent.glob("AGENTS.md.backup.*"))
+        self.assertEqual(os.readlink(backup), "missing-agents")
+        self.assertEqual(self.dsh_agents.resolve(), self.source / "AGENTS.md")
+
+    def test_dsh_link_failure_restores_existing_content(self):
+        self.dsh_agents.parent.mkdir()
+        self.dsh_agents.write_text("保留 dsh 指令")
+        symlink_to = Path.symlink_to
+
+        def link(destination, *args, **kwargs):
+            if destination == self.dsh_agents:
+                raise OSError("模拟 dsh 链接失败")
+            return symlink_to(destination, *args, **kwargs)
+
+        with mock.patch.object(Path, "symlink_to", new=link):
+            with self.assertRaises(OSError):
+                sync.deploy(self.repository, self.target)
+        self.assertEqual(self.dsh_agents.read_text(), "保留 dsh 指令")
+        self.assertFalse(list(self.dsh_agents.parent.glob("*.backup.*")))
+        self.assertTrue((self.target / "AGENTS.md").is_symlink())
+
+    def test_rejects_dsh_directory_linked_to_source(self):
+        self.dsh_agents.parent.symlink_to(self.source, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            sync.deploy(self.repository, self.target)
+        self.assertFalse(self.target.exists())
+        self.assertFalse((self.source / "AGENTS.md").is_symlink())
+        self.assertEqual((self.source / "AGENTS.md").read_text(), "全局指令\n")
+
     def test_missing_source_leaves_target_untouched(self):
         with self.assertRaises(ValueError):
             sync.deploy(self.base / "missing", self.target)
@@ -204,11 +263,12 @@ class CodexSyncTests(unittest.TestCase):
         self.assertTrue((self.repository / "local").exists())
         self.assertFalse(self.target.exists())
 
-    def run_remote(self, password=None, fail=False):
+    def run_remote(self, password=None, fail=False, remote_python="python3"):
         temporary_paths = []
         secret = "空 格'\"$;`\\密码" if password else None
         args = type("Args", (), dict(host="192.0.2.1", user="alice", password=secret,
-                                     source=str(self.repository), target=str(self.target), update=False))()
+                                     source=str(self.repository), target=str(self.target), update=False,
+                                     remote_python=remote_python))()
 
         def run(command, **kwargs):
             self.assertEqual(command[0], "ssh")
@@ -227,9 +287,16 @@ class CodexSyncTests(unittest.TestCase):
             if fail:
                 raise subprocess.CalledProcessError(255, command)
             remote_command = shlex.split(command[-1])
-            self.assertEqual(remote_command[:2], ["python3", "-c"])
-            return REAL_RUN([sys.executable, "-c", remote_command[-1]],
-                            input=kwargs["input"], text=True, capture_output=True, check=True)
+            interpreter = ["py", "-3"] if remote_python == "py" else [remote_python]
+            self.assertEqual(remote_command[:-1], interpreter + ["-X", "utf8", "-c"])
+            self.assertNotIn("\n", command[-1])
+            self.assertNotIn(str(self.repository), command[-1])
+            # CMD 和 PowerShell 都只需移除启动器最外层的双引号。
+            launcher = command[-1].split(' -c "', 1)[1][:-1]
+            self.assertEqual(launcher, remote_command[-1])
+            return REAL_RUN([sys.executable, "-X", "utf8", "-c", launcher],
+                            input=kwargs["input"], text=True, encoding="utf-8", capture_output=True, check=True,
+                            env=dict(os.environ, HOME=str(self.remote_home), USERPROFILE=str(self.remote_home)))
 
         with mock.patch.object(sync.subprocess, "run", side_effect=run):
             if fail:
@@ -243,18 +310,111 @@ class CodexSyncTests(unittest.TestCase):
     def test_remote_executes_transmitted_helper(self):
         self.run_remote()
         self.assertTrue((self.target / "AGENTS.md").is_symlink())
+        remote_agents = self.remote_home / ".dsh" / "AGENTS.md"
+        self.assertTrue(remote_agents.is_symlink())
+        self.assertEqual(remote_agents.resolve(), self.source / "AGENTS.md")
+        self.assertFalse(self.dsh_agents.parent.exists())
 
+    @unittest.skipIf(os.name == "nt", "自动密码认证仅支持 POSIX 发起端")
     def test_remote_password_and_cleanup(self):
         self.run_remote(password=True)
         self.assertTrue((self.target / "AGENTS.md").is_symlink())
 
+    def test_remote_windows_python_commands_and_special_paths(self):
+        repository = self.repository.with_name("source 中文 & '$();")
+        self.repository.rename(repository)
+        self.repository = repository
+        self.source = repository / "codex"
+        for interpreter in ("python", "py"):
+            with self.subTest(interpreter=interpreter):
+                self.run_remote(remote_python=interpreter)
+                self.assertEqual((self.target / "AGENTS.md").resolve(), self.source / "AGENTS.md")
+                self.assertEqual((self.remote_home / ".dsh" / "AGENTS.md").resolve(), self.source / "AGENTS.md")
+
+    def test_remote_preserves_windows_paths_in_payload(self):
+        args = type("Args", (), dict(host="192.0.2.1", user=r"DOMAIN\alice.smith", password=None,
+                                     source=r"C:\Users\Alice Smith\agenttools", target="D:/Codex 配置",
+                                     update=True, remote_python="py"))()
+        with mock.patch.object(sync.subprocess, "run") as run:
+            sync.deploy_remote(args)
+        command = run.call_args.args[0]
+        payload = sync.json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(payload["source"], args.source)
+        self.assertEqual(payload["target"], args.target)
+        self.assertNotIn(args.source, command[-1])
+        self.assertEqual(command[command.index("-l") + 1], args.user)
+        self.assertTrue(command[-1].startswith('py -3 -X utf8 -c "'))
+
+    def test_cli_accepts_windows_ssh_usernames(self):
+        for user in (r"DOMAIN\alice.smith", "Alice Smith", "alice.smith"):
+            with self.subTest(user=user), \
+                    mock.patch.object(sys, "argv", [str(HELPER), "--host", "192.0.2.1", "--user", user,
+                                                   "--remote-python", "python"]), \
+                    mock.patch.object(sync, "deploy_remote") as deploy_remote:
+                self.assertEqual(sync.main(), 0)
+                self.assertEqual(deploy_remote.call_args.args[0].user, user)
+
+    def test_windows_symlink_preflight_and_deployment(self):
+        self.policy_source()
+        self.add_skill()
+        with mock.patch.object(sync, "IS_WINDOWS", True):
+            sync.deploy(self.repository, self.target)
+        self.assertTrue(self.dsh_agents.is_symlink())
+        self.assertFalse(list(self.target.glob(".link-check-*")))
+        self.assertIn('approval_policy = "on-request"', (self.target / "config.toml").read_text())
+
+    def test_windows_missing_symlink_privilege_stops_before_changes(self):
+        self.policy_source()
+        self.target.mkdir()
+        config = self.target / "config.toml"
+        config.write_text('model = "保留"\n')
+        error = OSError("缺少特权")
+        error.winerror = 1314
+        with mock.patch.object(sync, "IS_WINDOWS", True), \
+                mock.patch.object(Path, "symlink_to", side_effect=error):
+            with self.assertRaisesRegex(ValueError, "开发者模式"):
+                sync.deploy(self.repository, self.target)
+        self.assertEqual(config.read_text(), 'model = "保留"\n')
+        self.assertFalse((self.target / "AGENTS.md").exists())
+        self.assertFalse(self.dsh_agents.parent.exists())
+        self.assertFalse(list(self.target.glob("*.backup.*")))
+        self.assertFalse(list(self.target.glob(".link-check-*")))
+
+    def test_windows_link_failure_restores_previous_item(self):
+        self.target.mkdir()
+        destination = self.target / "AGENTS.md"
+        destination.write_text("保留")
+        error = OSError("缺少特权")
+        error.winerror = 1314
+        with mock.patch.object(sync, "IS_WINDOWS", True), \
+                mock.patch.object(Path, "symlink_to", side_effect=error):
+            with self.assertRaises(ValueError):
+                sync.link_item(self.source / "AGENTS.md", destination)
+        self.assertEqual(destination.read_text(), "保留")
+        self.assertFalse(list(self.target.glob("*.backup.*")))
+
+    def test_windows_missing_git_does_not_call_package_manager(self):
+        with mock.patch.object(sync, "IS_WINDOWS", True), \
+                mock.patch.object(sync.shutil, "which", return_value=None), \
+                mock.patch.object(sync.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "Git for Windows"):
+                sync.install_git(None, dict(os.environ))
+        run.assert_not_called()
+
+    def test_windows_ssh_client_uses_existing_authentication(self):
+        with mock.patch.object(sync, "IS_WINDOWS", True):
+            self.run_remote(remote_python="python")
+            with self.assertRaisesRegex(ValueError, "密钥或 ssh-agent"):
+                self.run_remote(password=True)
+
+    @unittest.skipIf(os.name == "nt", "自动密码认证仅支持 POSIX 发起端")
     def test_remote_failure_also_cleans_credentials(self):
         self.run_remote(password=True, fail=True)
         self.assertFalse(self.target.exists())
 
     def test_cli_rejects_incomplete_connection(self):
         for args in (("--host", "example.com"), ("--port", "22"),
-                     ("--host", "", "--user", "")):
+                     ("--host", "", "--user", ""), ("--remote-python", "python;exit")):
             with self.subTest(args=args):
                 result = REAL_RUN([sys.executable, str(HELPER), *args], capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0)
@@ -283,7 +443,8 @@ class CodexSyncTests(unittest.TestCase):
         self.assertIn('# 模型配置\nmodel = "example"\n', merged)
         self.assertTrue(merged.endswith(original[original.index('[mcp_servers.demo]'):]))
         self.assertLess(merged.index('approvals_reviewer'), merged.index('[mcp_servers.demo]'))
-        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+        if os.name != "nt":
+            self.assertEqual(target.stat().st_mode & 0o777, 0o640)
         self.assertEqual(next(self.target.glob('config.toml.backup.*')).read_text(), original)
         before = sorted(self.target.glob('config.toml.backup.*'))
         sync.deploy(self.repository, self.target)
@@ -295,7 +456,8 @@ class CodexSyncTests(unittest.TestCase):
         sync.deploy(self.repository, self.target)
         target = self.target / "config.toml"
         self.assertFalse(target.is_symlink())
-        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
         for comment in ('# 由 Codex', '# 沙箱', '# 使用自动审批'):
             self.assertIn(comment, target.read_text())
         self.assertFalse(list(self.target.glob('config.toml.backup.*')))
@@ -424,7 +586,8 @@ class CodexSyncTests(unittest.TestCase):
                 installed = True
             return subprocess.CompletedProcess(command, 0)
 
-        with mock.patch.object(sync.os, "geteuid", return_value=1000), \
+        with mock.patch.object(sync, "IS_WINDOWS", False), \
+                mock.patch.object(sync.os, "geteuid", return_value=1000, create=True), \
                 mock.patch.object(sync.shutil, "which", side_effect=which), \
                 mock.patch.object(sync.subprocess, "run", side_effect=run):
             sync.install_git("secret", sync.proxy_environment())
@@ -443,8 +606,9 @@ class CodexSyncTests(unittest.TestCase):
         def which(name):
             return None if name == "git" else "/usr/bin/" + name
 
-        with mock.patch.object(sync.shutil, "which", side_effect=which), \
-                mock.patch.object(sync.os, "geteuid", return_value=1000), \
+        with mock.patch.object(sync, "IS_WINDOWS", False), \
+                mock.patch.object(sync.shutil, "which", side_effect=which), \
+                mock.patch.object(sync.os, "geteuid", return_value=1000, create=True), \
                 mock.patch.object(sync, "network_environment", return_value=dict(os.environ)), \
                 mock.patch.object(sync.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["sudo"])) as run:
             with self.assertRaises(subprocess.CalledProcessError):

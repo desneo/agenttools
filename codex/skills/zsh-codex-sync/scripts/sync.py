@@ -2,12 +2,12 @@
 """合并 Codex 审批配置，并增量软链接全局指令及 skills。"""
 
 import argparse
+import base64
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -25,6 +25,7 @@ ALLOWED_ORIGINS = {
     "ssh://git@github.com/desneo/agenttools.git",
 }
 POLICY_KEYS = {"approval_policy", "sandbox_mode", "approvals_reviewer"}
+IS_WINDOWS = os.name == "nt"
 
 
 def toml_statements(text):
@@ -214,6 +215,8 @@ def network_environment():
 def install_git(password, env):
     if shutil.which("git"):
         return
+    if IS_WINDOWS:
+        raise ValueError("Windows 目标缺少 Git，请先安装 Git for Windows 并将 git 加入 PATH 后重试")
     if not shutil.which("apt-get"):
         raise ValueError("缺少 Git，当前仅支持在 Ubuntu/Debian 上自动安装")
     prefix = []
@@ -241,7 +244,7 @@ def install_git(password, env):
 
 def git(repository, *args, capture=False, env=None):
     return subprocess.run(
-        ["git", "-C", str(repository), *args], check=True, text=True,
+        ["git", "-C", str(repository), *args], check=True, text=True, encoding="utf-8",
         stdout=subprocess.PIPE if capture else None,
         env=dict(env if env is not None else os.environ, GIT_TERMINAL_PROMPT="0"),
     ).stdout
@@ -279,6 +282,33 @@ def update_repository(repository, password=None):
     git(repository, "pull", "--ff-only", env=env)
 
 
+def create_symlink(source, destination):
+    try:
+        destination.symlink_to(source, target_is_directory=source.is_dir())
+    except OSError as error:
+        if IS_WINDOWS and getattr(error, "winerror", None) == 1314:
+            raise ValueError(
+                "Windows 当前用户没有创建软链接的权限；请在目标机器启用开发者模式，"
+                "或使用有创建符号链接权限的账户执行部署（SSH 会话也需具备该权限）"
+            ) from error
+        raise
+
+
+def check_windows_symlinks(target):
+    """在修改目标配置前检查文件和目录软链接权限。"""
+    if not IS_WINDOWS:
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".link-check-", dir=target) as temporary:
+        folder = Path(temporary)
+        source_file = folder / "file"
+        source_file.touch()
+        source_directory = folder / "directory"
+        source_directory.mkdir()
+        create_symlink(source_file, folder / "file-link")
+        create_symlink(source_directory, folder / "directory-link")
+
+
 def link_item(source, destination):
     if destination.is_symlink():
         try:
@@ -297,8 +327,8 @@ def link_item(source, destination):
         destination.rename(backup)
         log(f"已备份：{backup}")
     try:
-        destination.symlink_to(source, target_is_directory=source.is_dir())
-    except OSError:
+        create_symlink(source, destination)
+    except (OSError, ValueError):
         if backup is not None and not os.path.lexists(destination):
             backup.rename(destination)
             log(f"链接失败，已还原：{destination}")
@@ -320,6 +350,10 @@ def deploy(repository, target=None, update=False, password=None):
     skill_target = (target / "skills").resolve()
     if skill_target == source or source in skill_target.parents or skill_target in source.parents:
         raise ValueError("目标 skills 目录指向来源目录，请先调整该目录链接")
+    dsh_directory = Path("~/.dsh").expanduser()
+    dsh_resolved = dsh_directory.resolve()
+    if dsh_resolved == source or source in dsh_resolved.parents or dsh_resolved in source.parents:
+        raise ValueError("目标 .dsh 目录与来源 codex 目录不能相同或互相包含")
     configs = sorted(item for item in source.iterdir() if item.is_file())
     skills = source / "skills"
     skill_items = sorted(
@@ -330,6 +364,7 @@ def deploy(repository, target=None, update=False, password=None):
             raise ValueError(f"来源包含软链接，请先确认实际内容：{item}")
     config_source = source / "config.toml"
     config_content = prepare_config(config_source, target / "config.toml") if config_source.is_file() else None
+    check_windows_symlinks(target)
     target.mkdir(parents=True, exist_ok=True)
     (target / "skills").mkdir(exist_ok=True)
     log(f"来源：{repository}；目标：{target}")
@@ -340,12 +375,16 @@ def deploy(repository, target=None, update=False, password=None):
             link_item(item, target / item.name)
     for item in skill_items:
         link_item(item, target / "skills" / item.name)
-    log(f"部署完成：{len(configs)} 个配置文件，{len(skill_items)} 个 skill")
+    dsh_directory.mkdir(parents=True, exist_ok=True)
+    link_item(source / "AGENTS.md", dsh_directory / "AGENTS.md")
+    log(f"部署完成：{len(configs)} 个 Codex 配置文件，{len(skill_items)} 个 skill，dsh 全局指令已链接")
 
 
 def deploy_remote(args):
     if not shutil.which("ssh"):
         raise ValueError("本机缺少 SSH 客户端")
+    if IS_WINDOWS and args.password is not None:
+        raise ValueError("Windows 发起 SSH 部署时请使用密钥或 ssh-agent 认证，省略 --password；自动密码认证仅支持 POSIX 客户端")
     # 通过 SSH 标准输入传输 helper，目标仓库无需预装此 skill。
     bootstrap = (
         "import json,sys\np=json.load(sys.stdin)\nn={'__name__':'codex_sync_remote'}\n"
@@ -355,17 +394,22 @@ def deploy_remote(args):
         "except Exception as error:\n"
         " print('[错误] 远程部署失败：'+str(error),file=sys.stderr)\n sys.exit(1)\n"
     )
+    # 单行 ASCII 启动器兼容 POSIX shell、CMD 和 PowerShell；路径只放在 JSON 中。
+    encoded = base64.b64encode(bootstrap.encode("utf-8")).decode("ascii")
+    launcher = f"exec(__import__('base64').b64decode('{encoded}'))"
+    remote_python = getattr(args, "remote_python", "python3")
+    interpreter = "py -3" if remote_python == "py" else remote_python
     command = [
         "ssh", "-T", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10",
-        "-l", args.user, args.host, "python3 -c " + shlex.quote(bootstrap),
+        "-l", args.user, args.host, f'{interpreter} -X utf8 -c "{launcher}"',
     ]
     payload = json.dumps({
-        "helper": Path(__file__).read_text(), "source": args.source,
+        "helper": Path(__file__).read_text(encoding="utf-8"), "source": args.source,
         "target": args.target, "update": args.update, "password": args.password,
     })
     log(f"SSH 部署：{args.user}@{args.host}")
     if args.password is None:
-        subprocess.run(command, input=payload, text=True, check=True)
+        subprocess.run(command, input=payload, text=True, encoding="utf-8", check=True)
         return
     with tempfile.TemporaryDirectory(prefix="zsh-codex-sync-") as temporary:
         folder = Path(temporary)
@@ -379,7 +423,7 @@ def deploy_remote(args):
                    DISPLAY=os.environ.get("DISPLAY") or ":0", CODEX_SYNC_PASSWORD_FILE=str(password_file))
         subprocess.run(
             command[:1] + ["-o", "NumberOfPasswordPrompts=1"] + command[1:],
-            input=payload, text=True, check=True, env=env, start_new_session=True,
+            input=payload, text=True, encoding="utf-8", check=True, env=env, start_new_session=True,
         )
 
 
@@ -390,13 +434,17 @@ def main():
     parser.add_argument("--update", action="store_true", help="通过 HTTPS 克隆或快进更新来源仓库")
     parser.add_argument("--host", help="SSH 主机，默认端口 22")
     parser.add_argument("--user", help="SSH 用户名")
+    parser.add_argument("--remote-python", choices=("python3", "python", "py"), default="python3",
+                        help="远程 Python 3 命令，默认 python3；Windows 可用 python 或 py（自动加 -3）")
     parser.add_argument("--password", help="SSH 和安装 Git 时的 sudo 密码；本机仅用于 sudo")
     args = parser.parse_args()
     if (args.host is None) != (args.user is None):
         parser.error("--host 和 --user 必须同时指定")
     if args.host is not None and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.:%_-]*", args.host):
         parser.error("SSH 主机名或 IP 格式无效")
-    if args.user is not None and not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*\$?", args.user):
+    if args.user is not None and (
+        not args.user.strip() or args.user.startswith("-") or any(ord(char) < 32 for char in args.user)
+    ):
         parser.error("SSH 用户名格式无效")
     if args.password is not None and ("\n" in args.password or "\r" in args.password):
         parser.error("密码不能包含换行符")

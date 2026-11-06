@@ -5,10 +5,11 @@
 ## 同步部署 skill
 
 [zsh-codex-sync](codex/skills/zsh-codex-sync/SKILL.md) 将仓库中的全局配置和自定义 skills 部署到本机或 SSH 远程机器。审批设置按字段合并，全局指令和 skill 目录增量建立软链接；已有内容按部署规则保留或备份。
+目标支持 POSIX 和原生 Windows；Windows 本机使用 PowerShell，远程目标支持 OpenSSH 的 CMD 或 PowerShell 默认 shell。
 
 ### 首次接入本机
 
-目标机器需已有 Codex 和 Python 3。以下首次下载命令需要本机已有 Git；helper 执行 `--update` 时会自动补齐缺失的 Git。以希望持有配置的用户执行：
+目标机器需已有 Codex 和 Python 3。以下首次下载命令需要本机已有 Git；helper 执行 `--update` 时会在 Ubuntu/Debian 上自动补齐缺失的 Git。以希望持有配置的用户执行：
 
 ```bash
 git clone https://github.com/desneo/agenttools.git ~/agenttools
@@ -25,9 +26,22 @@ python3 ~/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py
 
 可通过 `/skills` 检查当前 Codex 的发现结果；如未刷新，可重启会话。脚本成功创建链接不等于已经验证 Codex 加载了配置和 skills。
 
+### Windows 本机部署
+
+预装 Python 3 和 Git for Windows，并确保命令在 PATH 中可用。以持有配置的用户启用开发者模式，或授予其创建符号链接权限；部署前会测试文件和目录软链接，权限不足时停止并提示，不改动已有目标配置。保留软链接部署方式，不自动降级成文件复制或修改系统权限。
+
+在 PowerShell 中执行（没有 `py` 时可换成指向 Python 3 的 `python`）：
+
+```powershell
+git clone https://github.com/desneo/agenttools.git "$env:USERPROFILE/agenttools"
+py -3 -X utf8 "$env:USERPROFILE/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py"
+```
+
+Windows 的默认目录为 `%USERPROFILE%\.codex` 和 `%USERPROFILE%\.dsh\AGENTS.md`；`CODEX_HOME` 或 `--target` 只改变 Codex 目录。Windows 缺少 Git 时提示预装 Git for Windows，不自动运行包管理器。创建符号链接的权限要求见 [Python 文档](https://docs.python.org/3/library/os.html#os.symlink)。
+
 ### SSH 远程部署
 
-本机需要 Python 3 和 SSH 客户端，远程需要 Python 3。部署使用登录用户目录；`--update` 遇到缺失的 Git 时，在 Ubuntu/Debian 上使用 apt 自动安装 Git 和 CA 证书，需要 root 或 sudo 权限。已有 Git 时不安装软件，普通链接部署无需 sudo。不安装 Codex 或 CMake。
+本机需要 Python 3 和 SSH 客户端，远程需要 Python 3。部署使用登录用户目录；`--update` 遇到缺失的 Git 时，在 Ubuntu/Debian 上使用 apt 自动安装 Git 和 CA 证书，需要 root 或 sudo 权限。Windows 目标需预装 Git for Windows 并具备上述软链接权限。已有 Git 时不安装软件，普通链接部署无需 sudo。不安装 Codex 或 CMake。
 
 ```bash
 # 使用已有 SSH 密钥或交互认证，克隆或更新远程 ~/agenttools 后部署
@@ -37,9 +51,17 @@ python3 codex/skills/zsh-codex-sync/scripts/sync.py \
 # 密码认证，同时供自动安装 Git 时的 sudo 使用
 python3 codex/skills/zsh-codex-sync/scripts/sync.py \
   --host 192.168.1.10 --user alice --password '密码' --update
+
+# 部署到原生 Windows，远程使用 python 命令；也可指定 --remote-python py
+python3 codex/skills/zsh-codex-sync/scripts/sync.py \
+  --host 192.168.1.20 --user alice --remote-python python \
+  --source 'C:/Users/alice/agenttools' --update
 ```
 
+Windows 远程需启用 OpenSSH Server，登录会话的 PATH 中应有 Python 3 和 Git，且会话具备创建软链接权限。远程默认 Python 命令为 `python3`；`--remote-python python` 使用 `python`，`--remote-python py` 使用 `py -3`。单行 Base64 启动器适配 POSIX shell、CMD 和 PowerShell；路径和 helper 通过 JSON 标准输入传输，中文统一使用 UTF-8。远程路径按目标系统解释，支持正斜杠或带引号的反斜杠 Windows 路径；用户名支持点号、空格和域前缀。Windows OpenSSH 的默认 shell 说明见 [Microsoft 文档](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration#configuring-the-default-shell-for-openssh-in-windows)。
+
 SSH 默认端口 22，不提供端口参数；现有 SSH 客户端配置仍生效。首次连接接受并记录新主机密钥，已记录密钥发生变化时拒绝连接。临时密码文件仅当前用户可读，退出时清理；命令行密码可能出现在 shell 历史或进程参数中。密码不支持换行符。
+自动密码认证仅支持 POSIX 发起端（目标可为 Windows）；从 Windows 发起 SSH 部署时使用密钥或 ssh-agent，省略 `--password`。
 
 远程部署同步的是 GitHub 已发布的仓库内容，不上传本机未提交、未推送的改动。helper 通过 SSH 标准输入传输，因此远程无需预先安装本 skill。
 
@@ -51,6 +73,7 @@ SSH 默认端口 22，不提供端口参数；现有 SSH 客户端配置仍生�
 | `--target 路径` | 部署目录，默认目标环境的 `CODEX_HOME` 或 `~/.codex` |
 | `--update` | 通过 HTTPS 克隆或快进更新来源仓库；不指定时直接部署已有文件 |
 | `--host 主机`、`--user 用户名` | SSH 远程部署，必须同时指定 |
+| `--remote-python python3\|python\|py` | 远程 Python 3 命令，默认 `python3`；`py` 自动加 `-3`，用于 Windows Python Launcher |
 | `--password 密码` | SSH 和自动安装 Git 时的 sudo 密码；本机只用于 sudo |
 
 远程模式下 `--source` 和 `--target` 均为远程路径，不转发本机的 `CODEX_HOME`。
@@ -79,9 +102,12 @@ agenttools/
 
 ```text
 ~/.codex/AGENTS.md             -> <仓库>/codex/AGENTS.md
+~/.dsh/AGENTS.md               -> <仓库>/codex/AGENTS.md
 ~/.codex/skills/zsh-codex-sync     -> <仓库>/codex/skills/zsh-codex-sync
 ~/.codex/skills/<自定义名称>   -> <仓库>/codex/skills/<自定义名称>
 ```
+
+本机和 SSH 远程部署都会为 dsh agent 创建 `~/.dsh/AGENTS.md` 链接，缺少 `~/.dsh/` 时自动创建。该路径始终位于目标用户的主目录下（POSIX 使用 HOME，Windows 使用 USERPROFILE），不受 `CODEX_HOME` 或 `--target` 影响；已有同名内容按下述规则备份，重复部署跳过相同链接，链接失败时还原当前项。
 
 `codex/config.toml` 按顶层字段合并到目标 `config.toml`，维护以下全局设置：
 
@@ -96,7 +122,7 @@ sandbox_mode = "workspace-write"
 approvals_reviewer = "auto_review"
 ```
 
-合并保留已有模型、服务商、MCP、profile、其他字段及注释，缺失字段连同来源中的注释插入到首个 TOML 表之前。只有值变化时才备份并原子写入；值相同时跳过。目标保存为普通文件，已有软链接先备份并转换，原链接指向的文件保持原状。已有普通文件的权限保留，新配置权限为 `0600`。
+合并保留已有模型、服务商、MCP、profile、其他字段及注释，缺失字段连同来源中的注释插入到首个 TOML 表之前。只有值变化时才备份并原子写入；值相同时跳过。目标保存为普通文件，已有软链接先备份并转换，原链接指向的文件保持原状。POSIX 上已有普通文件的权限保留，新配置权限为 `0600`；Windows 访问控制由所在目录的 ACL 决定，不承诺 POSIX 权限位。
 
 合并只处理这三个字段的顶层单行字符串；重复定义、点分键、表写法或未闭合内容会在改动前停止。项目配置和 profile 内的同名字段保持原状，最终生效值还受 Codex 配置优先级影响。三项配置的含义见 [自动审批审查](https://learn.chatgpt.com/docs/sandboxing/auto-review) 和 [配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
@@ -110,6 +136,8 @@ approvals_reviewer = "auto_review"
 
 ```bash
 python3 -m unittest discover -s tests -v
+# Windows 使用 UTF-8 模式，运行测试也需具备创建软链接权限
+py -3 -X utf8 -m unittest discover -s tests -v
 ```
 
 测试使用临时目录、本地 Git 仓库及模拟 SSH，不改动真实用户配置、不安装软件、不访问外网。有 Codex CLI 时额外用临时 `CODEX_HOME` 校验审批配置能被读取；没有时跳过该项。skill 格式使用 `skill-creator` 自带的 `quick_validate.py` 校验。
