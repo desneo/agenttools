@@ -1,30 +1,30 @@
 # agenttools
 
-个人维护的 Codex 全局配置与自定义 skills 仓库。
+个人维护的全局代理指令、自定义 skills 与 Codex 配置仓库，统一同步到 Codex、dsh 和 Antigravity。
 
 ## 同步部署 skill
 
-[zsh-codex-sync](codex/skills/zsh-codex-sync/SKILL.md) 将仓库中的全局配置和自定义 skills 部署到本机或 SSH 远程机器。审批设置按字段合并，全局指令和 skill 目录增量建立软链接；已有内容按部署规则保留或备份。
+[zsh-agent-sync](global/skills/zsh-agent-sync/SKILL.md) 将仓库中的全局指令、自定义 skills 和 Codex 配置部署到本机或 SSH 远程机器。Codex 审批设置按字段合并，全局指令和 skill 目录增量建立软链接到 Codex、dsh、Antigravity；已有内容按部署规则保留或备份。
 目标支持 POSIX 和原生 Windows；Windows 本机使用 PowerShell，远程目标支持 OpenSSH 的 CMD 或 PowerShell 默认 shell。
 
 ### 首次接入本机
 
-目标机器需已有 Codex 和 Python 3。以下首次下载命令需要本机已有 Git；helper 执行 `--update` 时会在 Ubuntu/Debian 上自动补齐缺失的 Git。以希望持有配置的用户执行：
+目标机器需已有 Python 3（以及对应目标工具如 Codex、dsh、Antigravity）。以下首次下载命令需要本机已有 Git；helper 执行 `--update` 时会在 Ubuntu/Debian 上自动补齐缺失的 Git。以希望持有配置的用户执行：
 
 ```bash
 git clone https://github.com/desneo/agenttools.git ~/agenttools
-python3 ~/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py
+python3 ~/agenttools/global/skills/zsh-agent-sync/scripts/sync.py
 ```
 
-如果已有仓库，直接运行第二条命令即可。首次部署会把 `zsh-codex-sync` 自身也软链接到用户 skills 目录。之后可以在 Codex 中使用：
+如果已有仓库，直接运行第二条命令即可。首次部署会把 `zsh-agent-sync` 自身也软链接到 Codex、dsh、Antigravity 的 skills 目录。之后可以在会话中使用：
 
 ```text
-使用 $zsh-codex-sync 将当前仓库的 Codex 配置和 skills 同步到本机。
-使用 $zsh-codex-sync 从 GitHub 更新仓库并部署到本机。
-使用 $zsh-codex-sync 将最新配置部署到远程机器，主机是 192.168.1.10，用户名是 alice。
+使用 $zsh-agent-sync 将当前仓库的全局配置和 skills 同步到本机。
+使用 $zsh-agent-sync 从 GitHub 更新仓库并部署到本机。
+使用 $zsh-agent-sync 将最新配置部署到远程机器，主机是 192.168.1.10，用户名是 alice。
 ```
 
-可通过 `/skills` 检查当前 Codex 的发现结果；如未刷新，可重启会话。脚本成功创建链接不等于已经验证 Codex 加载了配置和 skills。
+可通过 `/skills` 等方式检查当前工具的发现结果；如未刷新，可重启会话。脚本成功创建链接不等于已经验证目标工具加载了配置和 skills。
 
 ### Windows 本机部署
 
@@ -34,10 +34,10 @@ python3 ~/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py
 
 ```powershell
 git clone https://github.com/desneo/agenttools.git "$env:USERPROFILE/agenttools"
-py -3 -X utf8 "$env:USERPROFILE/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py"
+py -3 -X utf8 "$env:USERPROFILE/agenttools/global/skills/zsh-agent-sync/scripts/sync.py"
 ```
 
-Windows 的默认目录为 `%USERPROFILE%\.codex` 和 `%USERPROFILE%\.dsh\AGENTS.md`；`CODEX_HOME` 或 `--target` 只改变 Codex 目录。Windows 缺少 Git 时提示预装 Git for Windows，不自动运行包管理器。创建符号链接的权限要求见 [Python 文档](https://docs.python.org/3/library/os.html#os.symlink)。
+Windows 的默认目录为 `%USERPROFILE%\.codex`、`%USERPROFILE%\.dsh` 和 `%USERPROFILE%\.gemini\config`；`CODEX_HOME` 或 `--target` 只改变 Codex 目录。Windows 缺少 Git 时提示预装 Git for Windows，不自动运行包管理器。创建符号链接的权限要求见 [Python 文档](https://docs.python.org/3/library/os.html#os.symlink)。
 
 ### SSH 远程部署
 
@@ -45,15 +45,15 @@ Windows 的默认目录为 `%USERPROFILE%\.codex` 和 `%USERPROFILE%\.dsh\AGENTS
 
 ```bash
 # 使用已有 SSH 密钥或交互认证，克隆或更新远程 ~/agenttools 后部署
-python3 codex/skills/zsh-codex-sync/scripts/sync.py \
+python3 global/skills/zsh-agent-sync/scripts/sync.py \
   --host 192.168.1.10 --user alice --update
 
 # 密码认证，同时供自动安装 Git 时的 sudo 使用
-python3 codex/skills/zsh-codex-sync/scripts/sync.py \
+python3 global/skills/zsh-agent-sync/scripts/sync.py \
   --host 192.168.1.10 --user alice --password '密码' --update
 
 # 部署到原生 Windows，远程使用 python 命令；也可指定 --remote-python py
-python3 codex/skills/zsh-codex-sync/scripts/sync.py \
+python3 global/skills/zsh-agent-sync/scripts/sync.py \
   --host 192.168.1.20 --user alice --remote-python python \
   --source 'C:/Users/alice/agenttools' --update
 ```
@@ -70,7 +70,7 @@ SSH 默认端口 22，不提供端口参数；现有 SSH 客户端配置仍生�
 | 参数 | 行为 |
 | --- | --- |
 | `--source 路径` | agenttools 仓库根目录；本机默认推导当前 skill 所在仓库，远程默认 `~/agenttools` |
-| `--target 路径` | 部署目录，默认目标环境的 `CODEX_HOME` 或 `~/.codex` |
+| `--target 路径` | Codex 部署目录，默认目标环境的 `CODEX_HOME` 或 `~/.codex` |
 | `--update` | 通过 HTTPS 克隆或快进更新来源仓库；不指定时直接部署已有文件 |
 | `--host 主机`、`--user 用户名` | SSH 远程部署，必须同时指定 |
 | `--remote-python python3\|python\|py` | 远程 Python 3 命令，默认 `python3`；`py` 自动加 `-3`，用于 Windows Python Launcher |
@@ -88,28 +88,34 @@ SSH 默认端口 22，不提供端口参数；现有 SSH 客户端配置仍生�
 agenttools/
 ├── AGENTS.md
 ├── README.md
-├── codex/
-│   ├── AGENTS.md                 # 全局指令
-│   ├── config.toml               # 带中文注释的三个全局审批设置
+├── global/
+│   ├── AGENTS.md                     # 全局指令（Codex、dsh、Antigravity 共用）
 │   └── skills/
-│       └── zsh-codex-sync/
-│           ├── SKILL.md          # 同步部署工作流
-│           └── scripts/sync.py   # 可靠执行软链接和 SSH 部署
-└── tests/test_codex_sync.py
+│       └── zsh-agent-sync/
+│           ├── SKILL.md              # 同步部署工作流
+│           └── scripts/sync.py       # 可靠执行软链接和 SSH 部署
+├── codex/
+│   └── config.toml                   # 带中文注释的三个 Codex 全局审批设置
+└── tests/test_agent_sync.py
 ```
 
 默认链接关系：
 
 ```text
-~/.codex/AGENTS.md             -> <仓库>/codex/AGENTS.md
-~/.dsh/AGENTS.md               -> <仓库>/codex/AGENTS.md
-~/.codex/skills/zsh-codex-sync     -> <仓库>/codex/skills/zsh-codex-sync
-~/.codex/skills/<自定义名称>   -> <仓库>/codex/skills/<自定义名称>
+~/.codex/AGENTS.md                     -> <仓库>/global/AGENTS.md
+~/.codex/skills/zsh-agent-sync         -> <仓库>/global/skills/zsh-agent-sync
+~/.codex/skills/<自定义名称>           -> <仓库>/global/skills/<自定义名称>
+~/.dsh/AGENTS.md                       -> <仓库>/global/AGENTS.md
+~/.dsh/skills/zsh-agent-sync           -> <仓库>/global/skills/zsh-agent-sync
+~/.dsh/skills/<自定义名称>             -> <仓库>/global/skills/<自定义名称>
+~/.gemini/config/AGENTS.md             -> <仓库>/global/AGENTS.md
+~/.gemini/config/skills/zsh-agent-sync -> <仓库>/global/skills/zsh-agent-sync
+~/.gemini/config/skills/<自定义名称>   -> <仓库>/global/skills/<自定义名称>
 ```
 
-本机和 SSH 远程部署都会为 dsh agent 创建 `~/.dsh/AGENTS.md` 链接，缺少 `~/.dsh/` 时自动创建。该路径始终位于目标用户的主目录下（POSIX 使用 HOME，Windows 使用 USERPROFILE），不受 `CODEX_HOME` 或 `--target` 影响；已有同名内容按下述规则备份，重复部署跳过相同链接，链接失败时还原当前项。
+本机和 SSH 远程部署都会同时为 Codex、dsh（`~/.dsh/`）和 Antigravity（`~/.gemini/config/`）创建 `AGENTS.md` 和 `skills/<名称>` 链接，缺少目标目录或 `skills/` 子目录时自动创建。dsh 和 Antigravity 路径始终位于目标用户的主目录下（POSIX 使用 `HOME`，Windows 使用 `USERPROFILE`），不受 `CODEX_HOME` 或 `--target` 影响；已有同名内容按下述规则备份，重复部署跳过相同链接，链接失败时还原当前项。
 
-`codex/config.toml` 按顶层字段合并到目标 `config.toml`，维护以下全局设置：
+`codex/config.toml` 按顶层字段合并到 Codex 目标 `config.toml`，维护以下全局设置：
 
 ```toml
 # 由 Codex 按需请求执行审批。
@@ -126,11 +132,11 @@ approvals_reviewer = "auto_review"
 
 合并只处理这三个字段的顶层单行字符串；重复定义、点分键、表写法或未闭合内容会在改动前停止。项目配置和 profile 内的同名字段保持原状，最终生效值还受 Codex 配置优先级影响。三项配置的含义见 [自动审批审查](https://learn.chatgpt.com/docs/sandboxing/auto-review) 和 [配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
-`codex/` 根目录的其他普通文件逐个软链接部署；skills 只安装包含 `SKILL.md` 的一级目录。已指向同一来源的链接跳过，同名文件、目录、失效链接先备份为旁边的 `.backup.<时间>.<进程号>` 路径，链接失败时还原当前项。其他已完成项保留。其他来源的 skills 不删除，来源已移除 skill 的旧链接需自行清理。
+`codex/` 根目录的其他普通文件逐个软链接部署到 Codex 目标目录；`global/skills/` 只安装包含 `SKILL.md` 的一级目录。已指向同一来源的链接跳过，同名文件、目录、失效链接先备份为旁边的 `.backup.<时间>.<进程号>` 路径，链接失败时还原当前项，其他已完成项保留。其他来源的 skills 不删除，来源已移除 skill 的旧链接需自行清理。
 
-自己维护的 skill 名称和目录统一使用 `zsh-` 前缀。新增 skill 时创建 `codex/skills/zsh-<名称>/SKILL.md`，frontmatter 的 `name` 与目录名一致，包含 `description` 和实际指令，按需添加辅助资源，再运行 `$zsh-codex-sync`。本机可直接部署工作区；远程部署前需将变更发布到仓库。
+自己维护的 skill 名称和目录统一使用 `zsh-` 前缀。新增 skill 时创建 `global/skills/zsh-<名称>/SKILL.md`，frontmatter 的 `name` 与目录名一致，包含 `description` 和实际指令，按需添加辅助资源，再运行 `$zsh-agent-sync`。本机可直接部署工作区；远程部署前需将变更发布到仓库。
 
-按本仓库约定安装到 `~/.codex/skills/`。官方文档当前列出的用户 skills 标准路径为 `~/.agents/skills/`，使用时需检查当前 Codex 版本对约定目录的发现结果。全局指令 `codex/AGENTS.md` 与项目根目录 `AGENTS.md` 分别维护，不把凭据加入配置仓库。
+全局指令 `global/AGENTS.md` 与项目根目录 `AGENTS.md` 分别维护，不把凭据加入配置仓库。关于目标工具的常规约定：Antigravity 当前全局配置目录为 `~/.gemini/config/`；若在 Codex 中使用官方的 `~/.agents/skills/` 约定，需检查对应版本对约定目录的发现结果。
 
 ## 开发校验
 
@@ -142,4 +148,4 @@ py -3 -X utf8 -m unittest discover -s tests -v
 
 测试使用临时目录、本地 Git 仓库及模拟 SSH，不改动真实用户配置、不安装软件、不访问外网。有 Codex CLI 时额外用临时 `CODEX_HOME` 校验审批配置能被读取；没有时跳过该项。skill 格式使用 `skill-creator` 自带的 `quick_validate.py` 校验。
 
-参考：[Codex 全局指令](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[Skills](https://learn.chatgpt.com/docs/build-skills)。
+参考：[Codex 全局指令](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[Skills](https://learn.chatgpt.com/docs/build-skills)、[Antigravity Rules](https://antigravity.google/docs/rules.md)、[Antigravity Skills](https://antigravity.google/docs/skills.md)。

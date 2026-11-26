@@ -15,27 +15,32 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "codex/skills/zsh-codex-sync/scripts/sync.py"
-SPEC = importlib.util.spec_from_file_location("codex_sync", HELPER)
+HELPER = ROOT / "global/skills/zsh-agent-sync/scripts/sync.py"
+SPEC = importlib.util.spec_from_file_location("agent_sync", HELPER)
 sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync)
 REAL_RUN = subprocess.run
 GIT = shutil.which("git")
 
 
-class CodexSyncTests(unittest.TestCase):
+class AgentSyncTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="zsh-codex-sync-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="zsh-agent-sync-test-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.home = self.base / "home"
         self.home.mkdir()
-        self.dsh_agents = self.home / ".dsh" / "AGENTS.md"
+        self.dsh_dir = self.home / ".dsh"
+        self.dsh_agents = self.dsh_dir / "AGENTS.md"
+        self.antigravity_dir = self.home / ".gemini" / "config"
+        self.antigravity_agents = self.antigravity_dir / "AGENTS.md"
         self.remote_home = self.base / "remote home"
         self.repository = self.base / "source repo"
-        self.source = self.repository / "codex"
-        (self.source / "skills").mkdir(parents=True)
-        (self.source / "AGENTS.md").write_text("全局指令\n")
+        self.global_source = self.repository / "global"
+        self.codex_source = self.repository / "codex"
+        (self.global_source / "skills").mkdir(parents=True)
+        (self.global_source / "AGENTS.md").write_text("全局指令\n")
+        self.codex_source.mkdir()
         self.target = self.base / "target codex"
         self.output = io.StringIO()
         self.stdout_patch = redirect_stdout(self.output)
@@ -50,10 +55,17 @@ class CodexSyncTests(unittest.TestCase):
         self.addCleanup(self.env_patch.stop)
 
     def add_skill(self, name="示例 skill"):
-        skill = self.source / "skills" / name
-        skill.mkdir()
-        (skill / "SKILL.md").write_text("---\nname: example\ndescription: 示例\n---\n指令\n")
+        skill = self.global_source / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: 示例\n---\n指令\n")
         return skill
+
+    def extra_agent_targets(self, home=None):
+        root = home or self.home
+        return (root / ".dsh", root / ".gemini" / "config")
+
+    def all_agent_targets(self, codex_target=None, home=None):
+        return (codex_target or self.target, *self.extra_agent_targets(home))
 
     def git(self, directory, *args):
         return REAL_RUN([GIT, "-C", str(directory), *args], check=True, capture_output=True,
@@ -91,57 +103,72 @@ class CodexSyncTests(unittest.TestCase):
 
     def test_local_deployment_and_incremental_skills(self):
         skill = self.add_skill()
-        shutil.copyfile(ROOT / "codex/config.toml", self.source / "config.toml")
-        (self.source / "skills" / "incomplete").mkdir()
+        self.policy_source()
+        (self.global_source / "skills" / "incomplete").mkdir()
+        (self.antigravity_dir / "plugins").mkdir(parents=True)
+        (self.antigravity_dir / "plugins" / "keep.json").write_text("{}")
         sync.deploy(self.repository, self.target)
-        self.assertEqual((self.target / "AGENTS.md").resolve(), self.source / "AGENTS.md")
+        for agent_dir in self.all_agent_targets():
+            self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
+            self.assertEqual((agent_dir / "skills" / skill.name).resolve(), skill)
+            self.assertFalse((agent_dir / "skills" / "incomplete").exists())
         self.assertFalse((self.target / "config.toml").is_symlink())
         self.assertIn('approval_policy = "on-request"', (self.target / "config.toml").read_text())
-        self.assertEqual((self.target / "skills" / skill.name).resolve(), skill)
-        self.assertFalse((self.target / "skills" / "incomplete").exists())
+        for agent_dir in self.extra_agent_targets():
+            self.assertFalse((agent_dir / "config.toml").exists())
+        self.assertEqual((self.antigravity_dir / "plugins" / "keep.json").read_text(), "{}")
         second = self.add_skill("后续技能")
         sync.deploy(self.repository, self.target)
-        self.assertTrue((self.target / "skills" / second.name).is_symlink())
+        for agent_dir in self.all_agent_targets():
+            self.assertEqual((agent_dir / "skills" / second.name).resolve(), second)
 
     def test_bootstrap_and_invocation_through_installed_skill(self):
-        skill = self.source / "skills" / "zsh-codex-sync"
+        skill = self.global_source / "skills" / "zsh-agent-sync"
         shutil.copytree(HELPER.parents[1], skill)
         env = dict(os.environ, CODEX_HOME=str(self.target))
         REAL_RUN([sys.executable, str(skill / "scripts" / "sync.py")],
                  cwd=self.base, env=env, capture_output=True, text=True, check=True)
-        installed = self.target / "skills" / "zsh-codex-sync"
-        self.assertTrue(installed.is_symlink())
-        REAL_RUN([sys.executable, str(installed / "scripts" / "sync.py")],
-                 cwd=self.base, env=env, capture_output=True, text=True, check=True)
-        self.assertEqual((self.target / "AGENTS.md").resolve(), self.source / "AGENTS.md")
-        self.assertFalse(list(self.target.rglob("*.backup.*")))
+        for agent_dir in self.all_agent_targets():
+            installed = agent_dir / "skills" / "zsh-agent-sync"
+            self.assertTrue(installed.is_symlink())
+            REAL_RUN([sys.executable, str(installed / "scripts" / "sync.py")],
+                     cwd=self.base, env=env, capture_output=True, text=True, check=True)
+        for agent_dir in self.all_agent_targets():
+            self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
+            self.assertFalse(list(agent_dir.rglob("*.backup.*")))
 
     def test_backs_up_conflicts_and_preserves_other_skills(self):
         skill = self.add_skill()
-        (self.target / "skills" / skill.name).mkdir(parents=True)
-        (self.target / "skills" / skill.name / "original").write_text("保留")
-        (self.target / "skills" / "other").mkdir()
-        (self.target / "AGENTS.md").write_text("旧指令")
+        for agent_dir in self.all_agent_targets():
+            (agent_dir / "skills" / skill.name).mkdir(parents=True)
+            (agent_dir / "skills" / skill.name / "original").write_text("保留")
+            (agent_dir / "skills" / "other").mkdir()
+            (agent_dir / "AGENTS.md").write_text("旧指令")
         sync.deploy(self.repository, self.target)
-        backup = next((self.target / "skills").glob(skill.name + ".backup.*"))
-        self.assertEqual((backup / "original").read_text(), "保留")
-        self.assertEqual(next(self.target.glob("AGENTS.md.backup.*")).read_text(), "旧指令")
-        self.assertTrue((self.target / "skills" / "other").is_dir())
-        before = sorted(self.target.rglob("*.backup.*"))
-        sync.deploy(self.repository, self.target)
-        self.assertEqual(before, sorted(self.target.rglob("*.backup.*")))
+        for agent_dir in self.all_agent_targets():
+            backup = next((agent_dir / "skills").glob(skill.name + ".backup.*"))
+            self.assertEqual((backup / "original").read_text(), "保留")
+            self.assertEqual(next(agent_dir.glob("AGENTS.md.backup.*")).read_text(), "旧指令")
+            self.assertTrue((agent_dir / "skills" / "other").is_dir())
+            before = sorted(agent_dir.rglob("*.backup.*"))
+            sync.deploy(self.repository, self.target)
+            self.assertEqual(before, sorted(agent_dir.rglob("*.backup.*")))
 
     def test_backs_up_broken_and_circular_links(self):
-        self.target.mkdir()
-        link = self.target / "AGENTS.md"
-        link.symlink_to("/missing/codex-agents")
+        for agent_dir in self.all_agent_targets():
+            agent_dir.mkdir(parents=True)
+            link = agent_dir / "AGENTS.md"
+            link.symlink_to("/missing/agent-instructions")
         sync.deploy(self.repository, self.target)
-        backup = next(self.target.glob("AGENTS.md.backup.*"))
-        self.assertEqual(os.readlink(backup), "/missing/codex-agents")
-        link.unlink()
-        link.symlink_to("AGENTS.md")
+        for agent_dir in self.all_agent_targets():
+            link = agent_dir / "AGENTS.md"
+            backup = next(agent_dir.glob("AGENTS.md.backup.*"))
+            self.assertEqual(os.readlink(backup), "/missing/agent-instructions")
+            link.unlink()
+            link.symlink_to("AGENTS.md")
         sync.deploy(self.repository, self.target)
-        self.assertEqual(link.resolve(), self.source / "AGENTS.md")
+        for agent_dir in self.all_agent_targets():
+            self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
 
     def test_failed_link_restores_previous_item(self):
         self.target.mkdir()
@@ -152,93 +179,125 @@ class CodexSyncTests(unittest.TestCase):
                 sync.deploy(self.repository, self.target)
         self.assertEqual(destination.read_text(), "保留")
         self.assertFalse(list(self.target.glob("*.backup.*")))
+        for agent_dir in self.extra_agent_targets():
+            self.assertFalse(agent_dir.exists())
 
     def test_rejects_target_inside_source_and_reverse(self):
-        for target in (self.source, self.source / "nested", self.repository):
+        for target in (self.global_source, self.global_source / "nested",
+                       self.codex_source, self.codex_source / "nested", self.repository):
             with self.subTest(target=target), self.assertRaises(ValueError):
                 sync.deploy(self.repository, target)
 
     def test_rejects_skills_directory_linked_back_to_source(self):
         skill = self.add_skill()
-        self.target.mkdir()
-        (self.target / "skills").symlink_to(self.source / "skills")
-        with self.assertRaises(ValueError):
-            sync.deploy(self.repository, self.target)
-        self.assertFalse(skill.is_symlink())
-        self.assertTrue((skill / "SKILL.md").is_file())
-        self.assertFalse((self.target / "AGENTS.md").exists())
+        for agent_dir in self.all_agent_targets():
+            with self.subTest(agent_dir=agent_dir):
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                (agent_dir / "skills").symlink_to(self.global_source / "skills", target_is_directory=True)
+                with self.assertRaises(ValueError):
+                    sync.deploy(self.repository, self.target)
+                self.assertFalse(skill.is_symlink())
+                self.assertTrue((skill / "SKILL.md").is_file())
+                self.assertFalse((agent_dir / "AGENTS.md").exists())
+                (agent_dir / "skills").unlink()
 
     def test_honors_codex_home(self):
+        self.add_skill()
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.target)}):
             sync.deploy(self.repository)
-        self.assertTrue((self.target / "AGENTS.md").is_symlink())
+        for agent_dir in self.all_agent_targets():
+            self.assertTrue((agent_dir / "AGENTS.md").is_symlink())
+            self.assertTrue((agent_dir / "skills" / "示例 skill").is_symlink())
 
-    def test_dsh_agents_uses_home_with_custom_codex_targets(self):
+    def test_dsh_and_antigravity_use_home_with_custom_codex_targets(self):
+        skill = self.add_skill()
         for target in (None, self.base / "custom codex"):
             with self.subTest(target=target), mock.patch.dict(os.environ, {"CODEX_HOME": str(self.target)}):
                 sync.deploy(self.repository, target)
-            self.assertTrue(self.dsh_agents.is_symlink())
-            self.assertEqual(self.dsh_agents.resolve(), self.source / "AGENTS.md")
-        self.assertFalse(list(self.dsh_agents.parent.glob("*.backup.*")))
+            for agent_dir in self.extra_agent_targets():
+                self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
+                self.assertEqual((agent_dir / "skills" / skill.name).resolve(), skill)
+                self.assertFalse(list(agent_dir.rglob("*.backup.*")))
 
-    def test_dsh_agents_backs_up_existing_content_and_is_idempotent(self):
-        self.dsh_agents.parent.mkdir()
-        self.dsh_agents.write_text("原有 dsh 指令\n")
-        sync.deploy(self.repository, self.target)
-        backups = list(self.dsh_agents.parent.glob("AGENTS.md.backup.*"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_text(), "原有 dsh 指令\n")
-        self.assertEqual(self.dsh_agents.resolve(), self.source / "AGENTS.md")
-        sync.deploy(self.repository, self.target)
-        self.assertEqual(backups, list(self.dsh_agents.parent.glob("AGENTS.md.backup.*")))
-
-    def test_dsh_agents_backs_up_broken_link(self):
-        self.dsh_agents.parent.mkdir()
-        self.dsh_agents.symlink_to("missing-agents")
-        sync.deploy(self.repository, self.target)
-        backup = next(self.dsh_agents.parent.glob("AGENTS.md.backup.*"))
-        self.assertEqual(os.readlink(backup), "missing-agents")
-        self.assertEqual(self.dsh_agents.resolve(), self.source / "AGENTS.md")
-
-    def test_dsh_link_failure_restores_existing_content(self):
-        self.dsh_agents.parent.mkdir()
-        self.dsh_agents.write_text("保留 dsh 指令")
+    def test_extra_agents_back_up_conflicts_and_restore_on_failure(self):
+        skill = self.add_skill()
         symlink_to = Path.symlink_to
+        for label, agent_dir in (("dsh", self.dsh_dir), ("antigravity", self.antigravity_dir)):
+            with self.subTest(agent=label):
+                for path in (self.target, self.dsh_dir, self.antigravity_dir):
+                    if os.path.lexists(path):
+                        shutil.rmtree(path)
+                agents_file = agent_dir / "AGENTS.md"
+                agents_file.parent.mkdir(parents=True, exist_ok=True)
+                agents_file.write_text(f"保留 {label} 指令")
+                skill_dest = agent_dir / "skills" / skill.name
+                skill_dest.parent.mkdir(parents=True, exist_ok=True)
+                skill_dest.write_text("保留旧 skill")
 
-        def link(destination, *args, **kwargs):
-            if destination == self.dsh_agents:
-                raise OSError("模拟 dsh 链接失败")
-            return symlink_to(destination, *args, **kwargs)
+                def fail_link(destination, *args, **kwargs):
+                    if destination == agents_file:
+                        raise OSError(f"模拟 {label} 链接失败")
+                    return symlink_to(destination, *args, **kwargs)
 
-        with mock.patch.object(Path, "symlink_to", new=link):
-            with self.assertRaises(OSError):
+                with mock.patch.object(Path, "symlink_to", new=fail_link):
+                    with self.assertRaises(OSError):
+                        sync.deploy(self.repository, self.target)
+                self.assertEqual(agents_file.read_text(), f"保留 {label} 指令")
+                self.assertFalse(list(agent_dir.rglob("*.backup.*")))
+                self.assertTrue((self.target / "AGENTS.md").is_symlink())
+
                 sync.deploy(self.repository, self.target)
-        self.assertEqual(self.dsh_agents.read_text(), "保留 dsh 指令")
-        self.assertFalse(list(self.dsh_agents.parent.glob("*.backup.*")))
-        self.assertTrue((self.target / "AGENTS.md").is_symlink())
+                self.assertEqual(agents_file.resolve(), self.global_source / "AGENTS.md")
+                self.assertEqual(skill_dest.resolve(), skill)
+                self.assertEqual(next(agent_dir.glob("AGENTS.md.backup.*")).read_text(), f"保留 {label} 指令")
+                self.assertEqual(next((agent_dir / "skills").glob(skill.name + ".backup.*")).read_text(), "保留旧 skill")
 
-    def test_rejects_dsh_directory_linked_to_source(self):
-        self.dsh_agents.parent.symlink_to(self.source, target_is_directory=True)
-        with self.assertRaises(ValueError):
-            sync.deploy(self.repository, self.target)
-        self.assertFalse(self.target.exists())
-        self.assertFalse((self.source / "AGENTS.md").is_symlink())
-        self.assertEqual((self.source / "AGENTS.md").read_text(), "全局指令\n")
+    def test_rejects_extra_agent_directory_linked_to_source(self):
+        for agent_dir in self.extra_agent_targets():
+            with self.subTest(agent_dir=agent_dir):
+                agent_dir.parent.mkdir(parents=True, exist_ok=True)
+                agent_dir.symlink_to(self.global_source, target_is_directory=True)
+                with self.assertRaises(ValueError):
+                    sync.deploy(self.repository, self.target)
+                self.assertFalse(self.target.exists())
+                self.assertFalse((self.global_source / "AGENTS.md").is_symlink())
+                self.assertEqual((self.global_source / "AGENTS.md").read_text(), "全局指令\n")
+                agent_dir.unlink()
 
-    def test_missing_source_leaves_target_untouched(self):
+    def test_missing_source_or_global_agents_leaves_targets_untouched(self):
         with self.assertRaises(ValueError):
             sync.deploy(self.base / "missing", self.target)
-        self.assertFalse(self.target.exists())
+        (self.global_source / "AGENTS.md").unlink()
+        with self.assertRaisesRegex(ValueError, "global/AGENTS.md"):
+            sync.deploy(self.repository, self.target)
+        for agent_dir in self.all_agent_targets():
+            self.assertFalse(agent_dir.exists())
+
+    def test_deploy_without_codex_directory_still_syncs_global_assets(self):
+        shutil.rmtree(self.codex_source)
+        skill = self.add_skill()
+        sync.deploy(self.repository, self.target)
+        for agent_dir in self.all_agent_targets():
+            self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
+            self.assertEqual((agent_dir / "skills" / skill.name).resolve(), skill)
 
     def test_https_clone_and_fast_forward_update(self):
+        self.policy_source()
         upstream = self.prepare_git()
         destination = self.base / "fresh"
         with self.local_network(upstream):
             sync.deploy(destination, self.target, update=True)
             (upstream / "codex" / "new.ini").write_text("# 新配置\n")
+            remote_skill = upstream / "global" / "skills" / "remote-skill"
+            remote_skill.mkdir(parents=True)
+            (remote_skill / "SKILL.md").write_text("---\nname: remote-skill\ndescription: 远程\n---\n内容\n")
             self.commit(upstream)
             sync.deploy(destination, self.target, update=True)
         self.assertEqual((self.target / "new.ini").read_text(), "# 新配置\n")
+        for agent_dir in self.extra_agent_targets():
+            self.assertFalse((agent_dir / "new.ini").exists())
+        for agent_dir in self.all_agent_targets():
+            self.assertEqual((agent_dir / "skills" / "remote-skill").resolve(), destination / "global/skills/remote-skill")
         self.assertEqual(self.git(destination, "remote", "get-url", "origin"), sync.REPO_URL)
 
     def test_update_refuses_dirty_and_unrelated_repository(self):
@@ -278,7 +337,7 @@ class CodexSyncTests(unittest.TestCase):
                 self.assertNotIn(secret, " ".join(command))
                 self.assertTrue(kwargs["start_new_session"])
                 env = kwargs["env"]
-                password_file = Path(env["CODEX_SYNC_PASSWORD_FILE"])
+                password_file = Path(env["AGENT_SYNC_PASSWORD_FILE"])
                 temporary_paths.append(password_file.parent)
                 self.assertEqual(password_file.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(password_file.parent.stat().st_mode & 0o777, 0o700)
@@ -308,12 +367,13 @@ class CodexSyncTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
     def test_remote_executes_transmitted_helper(self):
+        skill = self.add_skill()
         self.run_remote()
-        self.assertTrue((self.target / "AGENTS.md").is_symlink())
-        remote_agents = self.remote_home / ".dsh" / "AGENTS.md"
-        self.assertTrue(remote_agents.is_symlink())
-        self.assertEqual(remote_agents.resolve(), self.source / "AGENTS.md")
-        self.assertFalse(self.dsh_agents.parent.exists())
+        for agent_dir in self.all_agent_targets(home=self.remote_home):
+            self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
+            self.assertEqual((agent_dir / "skills" / skill.name).resolve(), skill)
+        for local_dir in self.extra_agent_targets():
+            self.assertFalse(local_dir.exists())
 
     @unittest.skipIf(os.name == "nt", "自动密码认证仅支持 POSIX 发起端")
     def test_remote_password_and_cleanup(self):
@@ -321,15 +381,19 @@ class CodexSyncTests(unittest.TestCase):
         self.assertTrue((self.target / "AGENTS.md").is_symlink())
 
     def test_remote_windows_python_commands_and_special_paths(self):
+        skill = self.add_skill()
         repository = self.repository.with_name("source 中文 & '$();")
         self.repository.rename(repository)
         self.repository = repository
-        self.source = repository / "codex"
+        self.global_source = repository / "global"
+        self.codex_source = repository / "codex"
+        skill = self.global_source / "skills" / skill.name
         for interpreter in ("python", "py"):
             with self.subTest(interpreter=interpreter):
                 self.run_remote(remote_python=interpreter)
-                self.assertEqual((self.target / "AGENTS.md").resolve(), self.source / "AGENTS.md")
-                self.assertEqual((self.remote_home / ".dsh" / "AGENTS.md").resolve(), self.source / "AGENTS.md")
+                for agent_dir in self.all_agent_targets(home=self.remote_home):
+                    self.assertEqual((agent_dir / "AGENTS.md").resolve(), self.global_source / "AGENTS.md")
+                    self.assertEqual((agent_dir / "skills" / skill.name).resolve(), skill)
 
     def test_remote_preserves_windows_paths_in_payload(self):
         args = type("Args", (), dict(host="192.0.2.1", user=r"DOMAIN\alice.smith", password=None,
@@ -356,10 +420,12 @@ class CodexSyncTests(unittest.TestCase):
 
     def test_windows_symlink_preflight_and_deployment(self):
         self.policy_source()
-        self.add_skill()
+        skill = self.add_skill()
         with mock.patch.object(sync, "IS_WINDOWS", True):
             sync.deploy(self.repository, self.target)
-        self.assertTrue(self.dsh_agents.is_symlink())
+        for agent_dir in self.all_agent_targets():
+            self.assertTrue((agent_dir / "AGENTS.md").is_symlink())
+            self.assertTrue((agent_dir / "skills" / skill.name).is_symlink())
         self.assertFalse(list(self.target.glob(".link-check-*")))
         self.assertIn('approval_policy = "on-request"', (self.target / "config.toml").read_text())
 
@@ -376,7 +442,8 @@ class CodexSyncTests(unittest.TestCase):
                 sync.deploy(self.repository, self.target)
         self.assertEqual(config.read_text(), 'model = "保留"\n')
         self.assertFalse((self.target / "AGENTS.md").exists())
-        self.assertFalse(self.dsh_agents.parent.exists())
+        for agent_dir in self.extra_agent_targets():
+            self.assertFalse(agent_dir.exists())
         self.assertFalse(list(self.target.glob("*.backup.*")))
         self.assertFalse(list(self.target.glob(".link-check-*")))
 
@@ -389,7 +456,7 @@ class CodexSyncTests(unittest.TestCase):
         with mock.patch.object(sync, "IS_WINDOWS", True), \
                 mock.patch.object(Path, "symlink_to", side_effect=error):
             with self.assertRaises(ValueError):
-                sync.link_item(self.source / "AGENTS.md", destination)
+                sync.link_item(self.global_source / "AGENTS.md", destination)
         self.assertEqual(destination.read_text(), "保留")
         self.assertFalse(list(self.target.glob("*.backup.*")))
 
@@ -420,7 +487,7 @@ class CodexSyncTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def policy_source(self):
-        source = self.source / "config.toml"
+        source = self.codex_source / "config.toml"
         shutil.copyfile(ROOT / "codex/config.toml", source)
         return source
 
@@ -492,6 +559,8 @@ class CodexSyncTests(unittest.TestCase):
                     sync.deploy(self.repository, self.target)
                 self.assertEqual(target.read_text(), original)
                 self.assertFalse((self.target / 'AGENTS.md').exists())
+                for agent_dir in self.extra_agent_targets():
+                    self.assertFalse(agent_dir.exists())
                 self.assertFalse(list(self.target.glob('config.toml.backup.*')))
 
     def test_config_symlink_becomes_regular_file_without_changing_its_source(self):

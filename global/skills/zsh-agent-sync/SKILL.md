@@ -1,13 +1,18 @@
 ---
-name: zsh-codex-sync
-description: 将 agenttools 仓库中的 Codex 全局配置和自定义 skills 同步部署到本机或 SSH 远程用户目录；适用于配置同步、更新和增量软链接部署。
+name: zsh-agent-sync
+description: 将 agenttools 仓库中的全局指令、自定义 skills 和 Codex 配置同步部署到本机或 SSH 远程用户目录（覆盖 Codex、dsh、Antigravity）；适用于配置同步、更新和增量软链接部署。
 ---
 
-# zsh-codex-sync
+# zsh-agent-sync
 
-配置来源是 agenttools 仓库的 `codex/`，远程仓库地址为 `https://github.com/desneo/agenttools.git`。
-支持 POSIX 和原生 Windows 目标。部署到目标用户的 `~/.codex/`，若目标环境设置 `CODEX_HOME` 则使用该目录；用户显式指定部署目录时优先使用指定目录。Windows 的 `~` 使用目标用户的 `USERPROFILE`。
-同时将 `codex/AGENTS.md` 软链接到目标用户的 `~/.dsh/AGENTS.md`，供 dsh agent 使用。
+配置来源是 agenttools 仓库的 `global/`（`AGENTS.md` 与 `skills/`）和 `codex/`（`config.toml` 等 Codex 专用配置），远程仓库地址为 `https://github.com/desneo/agenttools.git`。
+支持 POSIX 和原生 Windows 目标。同时部署到目标用户的三个全局配置位置：
+
+- **Codex**：`~/.codex/`（目标环境设置 `CODEX_HOME` 或用户显式指定 `--target` 时优先使用对应目录）
+- **dsh**：`~/.dsh/`
+- **Antigravity**：`~/.gemini/config/`
+
+Windows 的 `~` 使用目标用户的 `USERPROFILE`。
 
 ## 执行
 
@@ -27,12 +32,12 @@ python3 <skill目录>/scripts/sync.py --source ~/agenttools
 ```
 
 用户要求从 GitHub 更新到最新版本时增加 `--update`；缺少仓库时该选项通过 HTTPS 克隆。
-用户指定自定义部署目录时使用 `--target`。
+用户指定自定义 Codex 部署目录时使用 `--target`。
 
 Windows 本机可在 PowerShell 中执行：
 
 ```powershell
-py -3 -X utf8 "$env:USERPROFILE/agenttools/codex/skills/zsh-codex-sync/scripts/sync.py"
+py -3 -X utf8 "$env:USERPROFILE/agenttools/global/skills/zsh-agent-sync/scripts/sync.py"
 ```
 
 ### SSH 远程
@@ -56,19 +61,20 @@ Windows SSH 目标需启用 OpenSSH Server，并确保该 SSH 会话可运行 Py
 ## 网络回退
 
 更新仓库前先通过当前网络及现有代理设置检查 GitHub；不可达时尝试 HTTP 代理 `http://192.168.1.56:7890`。
-代理只用于本次 Git 和 apt 调用，不写入系统、shell 或 Git 全局配置。两条路由均失败时停止，不关闭 TLS 证书校验。
+代理只用于本次 Git 和 apt 调用，不写入系统、shell 或 Git 全局配置。两条路由都失败时停止，不关闭 TLS 证书校验。
 
 ## 部署约定
 
-- `codex/config.toml` 只合并顶层 `approval_policy`、`sandbox_mode`、`approvals_reviewer`，保留目标的其他字段和注释；缺失字段附带来源中的中文注释，插入到首个表之前。
+- `codex/config.toml` 只合并顶层 `approval_policy`、`sandbox_mode`、`approvals_reviewer` 到 Codex 目标目录 `config.toml`，保留目标的其他字段和注释；缺失字段附带来源中的中文注释，插入到首个表之前。
 - 修改前备份 `config.toml`，原子写入普通文件；值一致时跳过。已有软链接会备份并转成普通文件，保留其可读内容，原链接指向的文件保持原状。
 - 合并兼容 Python 3.10，只处理三个字段的单行字符串写法；发现重复定义、点分键、表写法或未闭合内容时停止，先处理配置。项目或 profile 中的覆盖项保持原状，最终生效值还取决于 Codex 配置优先级。
-- `codex/` 根目录的其他普通文件逐个软链接到目标目录，包括 `AGENTS.md`，不替换整个配置目录。
-- 本机和 SSH 远程部署均额外创建 `~/.dsh/AGENTS.md -> <仓库>/codex/AGENTS.md`，目录不存在时创建；路径取目标用户的主目录（POSIX 为 HOME，Windows 为 USERPROFILE），不受 `CODEX_HOME` 或 `--target` 影响，沿用相同的备份、跳过和失败还原规则。
-- `codex/skills/` 下含 `SKILL.md` 的一级目录逐个软链接到目标 `skills/`，包括本 skill 自身。
+- `codex/` 根目录的其他普通文件逐个软链接到 Codex 目标目录，不替换整个配置目录。
+- `global/AGENTS.md` 分别软链接到 Codex 目标目录的 `AGENTS.md`、目标用户 `~/.dsh/AGENTS.md` 和 `~/.gemini/config/AGENTS.md`。
+- `global/skills/` 下含 `SKILL.md` 的一级目录分别软链接到 Codex 目标 `skills/`、目标用户 `~/.dsh/skills/` 和 `~/.gemini/config/skills/`，包括本 skill 自身。
+- dsh（`~/.dsh/`）和 Antigravity（`~/.gemini/config/`）路径取目标用户的主目录（POSIX 为 HOME，Windows 为 USERPROFILE），目录不存在时自动创建，不受 `CODEX_HOME` 或 `--target` 影响，沿用相同的备份、跳过和失败还原规则。
 - 已经指向同一来源的链接跳过。其他同名文件、目录或失效链接先在旁边备份，再建立新链接。
 - 保留其他来源的 skills；不删除仓库已移除 skill 的旧链接，不部署凭据。
 - 仓库更新只允许 `origin` 指向本仓库，并通过 HTTPS 快进更新；遇到本地修改、分叉或上游异常时停止，不重置、不清理、不强制覆盖仓库。
 - 自动安装和网络回退仍失败，或认证、链接失败时停止，报告原因及已完成步骤，不自动无限重试。
 
-完成后报告目标、配置和 skill 的链接结果、备份位置及失败项。创建软链接不代表已验证 Codex 实际加载；仅在确实检查过时报告发现或加载结果。
+完成后报告目标、配置和 skill 的链接结果、备份位置及失败项。创建软链接不代表已验证目标工具实际加载；仅在确实检查过时报告发现或加载结果。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""合并 Codex 审批配置，并增量软链接全局指令及 skills。"""
+"""同步全局指令、skills，并合并 Codex 审批配置。"""
 
 import argparse
 import base64
@@ -185,7 +185,7 @@ def probe_network(env):
             proxies.pop(scheme, None)
     # 显式代理已由调用方选定，避免当前进程的 NO_PROXY 覆盖回退路由。
     request = urllib.request.Request(
-        "https://github.com", headers={"User-Agent": "zsh-codex-sync", "Host": "github.com"},
+        "https://github.com", headers={"User-Agent": "zsh-agent-sync", "Host": "github.com"},
     )
     if proxies.get("https"):
         proxy = urllib.parse.urlparse(proxies["https"])
@@ -336,48 +336,79 @@ def link_item(source, destination):
     log(f"已链接：{destination} -> {source}")
 
 
+def ensure_disjoint(source_label, source_path, target_label, target_path):
+    """防止来源目录与部署目录相同或互相包含。"""
+    if source_path == target_path or source_path in target_path.parents or target_path in source_path.parents:
+        raise ValueError(f"来源 {source_label} 目录与目标 {target_label} 目录不能相同或互相包含")
+
+
+def validate_target_directory(label, path):
+    if os.path.lexists(path) and not path.is_dir():
+        raise ValueError(f"目标 {label} 路径不是目录：{path}")
+
+
+def deploy_global_target(target_dir, global_agents, skill_items):
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "skills").mkdir(exist_ok=True)
+    link_item(global_agents, target_dir / "AGENTS.md")
+    for item in skill_items:
+        link_item(item, target_dir / "skills" / item.name)
+
+
 def deploy(repository, target=None, update=False, password=None):
     repository = Path(repository).expanduser().resolve()
-    target = Path(target or os.environ.get("CODEX_HOME") or "~/.codex").expanduser().resolve()
-    source = (repository / "codex").resolve()
-    # 防止将来源放入目标目录或反向嵌套后产生自链接、破坏来源。
-    if source == target or source in target.parents or target in source.parents:
-        raise ValueError("来源 codex 目录与部署目录不能相同或互相包含")
+    codex_target = Path(target or os.environ.get("CODEX_HOME") or "~/.codex").expanduser().resolve()
+    global_source = (repository / "global").resolve()
+    codex_source = (repository / "codex").resolve()
+    dsh_target = Path("~/.dsh").expanduser()
+    antigravity_target = Path("~/.gemini/config").expanduser()
+    agent_targets = [
+        ("Codex", codex_target),
+        ("dsh", dsh_target),
+        ("Antigravity", antigravity_target),
+    ]
+    sources = [("global", global_source), ("codex", codex_source)]
+    for source_label, source_path in sources:
+        for agent_label, agent_dir in agent_targets:
+            ensure_disjoint(source_label, source_path, agent_label, agent_dir.resolve())
     if update:
         update_repository(repository, password)
-    if not (source / "AGENTS.md").is_file():
-        raise ValueError(f"来源缺少 codex/AGENTS.md：{repository}")
-    skill_target = (target / "skills").resolve()
-    if skill_target == source or source in skill_target.parents or skill_target in source.parents:
-        raise ValueError("目标 skills 目录指向来源目录，请先调整该目录链接")
-    dsh_directory = Path("~/.dsh").expanduser()
-    dsh_resolved = dsh_directory.resolve()
-    if dsh_resolved == source or source in dsh_resolved.parents or dsh_resolved in source.parents:
-        raise ValueError("目标 .dsh 目录与来源 codex 目录不能相同或互相包含")
-    configs = sorted(item for item in source.iterdir() if item.is_file())
-    skills = source / "skills"
+    global_agents = global_source / "AGENTS.md"
+    if not global_agents.is_file():
+        raise ValueError(f"来源缺少 global/AGENTS.md：{repository}")
+    for agent_label, agent_dir in agent_targets:
+        validate_target_directory(agent_label, agent_dir)
+        skills_dir = agent_dir / "skills"
+        validate_target_directory(f"{agent_label} skills", skills_dir)
+        for source_label, source_path in sources:
+            ensure_disjoint(source_label, source_path, agent_label, agent_dir.resolve())
+            ensure_disjoint(source_label, source_path, f"{agent_label} skills", skills_dir.resolve())
+    codex_configs = sorted(item for item in codex_source.iterdir() if item.is_file()) if codex_source.is_dir() else []
+    global_skills = global_source / "skills"
+    if global_skills.is_symlink():
+        raise ValueError(f"来源包含软链接，请先确认实际内容：{global_skills}")
     skill_items = sorted(
-        item for item in skills.iterdir() if item.is_dir() and (item / "SKILL.md").is_file()
-    ) if skills.is_dir() else []
-    for item in configs + skill_items:
+        item for item in global_skills.iterdir() if item.is_dir() and (item / "SKILL.md").is_file()
+    ) if global_skills.is_dir() else []
+    for item in codex_configs + [global_agents] + skill_items:
         if item.is_symlink():
             raise ValueError(f"来源包含软链接，请先确认实际内容：{item}")
-    config_source = source / "config.toml"
-    config_content = prepare_config(config_source, target / "config.toml") if config_source.is_file() else None
-    check_windows_symlinks(target)
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "skills").mkdir(exist_ok=True)
-    log(f"来源：{repository}；目标：{target}")
-    for item in configs:
+    config_source = codex_source / "config.toml"
+    config_content = prepare_config(config_source, codex_target / "config.toml") if config_source.is_file() else None
+    check_windows_symlinks(codex_target)
+    codex_target.mkdir(parents=True, exist_ok=True)
+    log(f"来源：{repository}；Codex：{codex_target}；dsh：{dsh_target}；Antigravity：{antigravity_target}")
+    for item in codex_configs:
         if item.name == "config.toml":
-            write_config(target / item.name, config_content)
+            write_config(codex_target / item.name, config_content)
         else:
-            link_item(item, target / item.name)
-    for item in skill_items:
-        link_item(item, target / "skills" / item.name)
-    dsh_directory.mkdir(parents=True, exist_ok=True)
-    link_item(source / "AGENTS.md", dsh_directory / "AGENTS.md")
-    log(f"部署完成：{len(configs)} 个 Codex 配置文件，{len(skill_items)} 个 skill，dsh 全局指令已链接")
+            link_item(item, codex_target / item.name)
+    for _, agent_dir in agent_targets:
+        deploy_global_target(agent_dir, global_agents, skill_items)
+    log(
+        f"部署完成：{len(codex_configs)} 个 Codex 配置文件，{len(skill_items)} 个 skill，"
+        "已同步到 Codex、dsh、Antigravity"
+    )
 
 
 def deploy_remote(args):
@@ -387,9 +418,9 @@ def deploy_remote(args):
         raise ValueError("Windows 发起 SSH 部署时请使用密钥或 ssh-agent 认证，省略 --password；自动密码认证仅支持 POSIX 客户端")
     # 通过 SSH 标准输入传输 helper，目标仓库无需预装此 skill。
     bootstrap = (
-        "import json,sys\np=json.load(sys.stdin)\nn={'__name__':'codex_sync_remote'}\n"
+        "import json,sys\np=json.load(sys.stdin)\nn={'__name__':'agent_sync_remote'}\n"
         "try:\n"
-        " exec(compile(p['helper'],'zsh-codex-sync-remote','exec'),n)\n"
+        " exec(compile(p['helper'],'zsh-agent-sync-remote','exec'),n)\n"
         " n['deploy'](p['source'] or '~/agenttools',p['target'],p['update'],p['password'])\n"
         "except Exception as error:\n"
         " print('[错误] 远程部署失败：'+str(error),file=sys.stderr)\n sys.exit(1)\n"
@@ -411,16 +442,16 @@ def deploy_remote(args):
     if args.password is None:
         subprocess.run(command, input=payload, text=True, encoding="utf-8", check=True)
         return
-    with tempfile.TemporaryDirectory(prefix="zsh-codex-sync-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="zsh-agent-sync-") as temporary:
         folder = Path(temporary)
         password_file = folder / "password"
         password_file.touch(mode=0o600)
         password_file.write_text(args.password + "\n")
         askpass = folder / "askpass"
-        askpass.write_text('#!/bin/sh\ncat -- "$CODEX_SYNC_PASSWORD_FILE"\n')
+        askpass.write_text('#!/bin/sh\ncat -- "$AGENT_SYNC_PASSWORD_FILE"\n')
         askpass.chmod(0o700)
         env = dict(os.environ, SSH_ASKPASS=str(askpass), SSH_ASKPASS_REQUIRE="force",
-                   DISPLAY=os.environ.get("DISPLAY") or ":0", CODEX_SYNC_PASSWORD_FILE=str(password_file))
+                   DISPLAY=os.environ.get("DISPLAY") or ":0", AGENT_SYNC_PASSWORD_FILE=str(password_file))
         subprocess.run(
             command[:1] + ["-o", "NumberOfPasswordPrompts=1"] + command[1:],
             input=payload, text=True, encoding="utf-8", check=True, env=env, start_new_session=True,
@@ -428,9 +459,9 @@ def deploy_remote(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="同步部署 agenttools 的 Codex 全局配置与 skills")
+    parser = argparse.ArgumentParser(description="同步部署 agenttools 的全局指令、skills 与 Codex 配置")
     parser.add_argument("--source", help="agenttools 仓库根目录；SSH 模式下为远程路径")
-    parser.add_argument("--target", help="部署目录；默认 CODEX_HOME 或 ~/.codex")
+    parser.add_argument("--target", help="Codex 部署目录；默认 CODEX_HOME 或 ~/.codex")
     parser.add_argument("--update", action="store_true", help="通过 HTTPS 克隆或快进更新来源仓库")
     parser.add_argument("--host", help="SSH 主机，默认端口 22")
     parser.add_argument("--user", help="SSH 用户名")
